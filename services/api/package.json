@@ -1,0 +1,12 @@
+{
+  "name": "@theteacher/api",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "echo \"TODO: start Hono worker (Wrangler/Miniflare)\"",
+    "build": "echo \"TODO: build worker bundle\"",
+    "lint": "echo \"TODO: add linting\"",
+    "test": "echo \"TODO: add tests\""
+  }
+}

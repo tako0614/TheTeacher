@@ -1,0 +1,15 @@
+{
+  "name": "@theteacher/shared",
+  "version": "0.0.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "echo \"TODO: build shared utilities\"",
+    "lint": "echo \"TODO: add linting\"",
+    "test": "echo \"TODO: add tests\""
+  }
+}

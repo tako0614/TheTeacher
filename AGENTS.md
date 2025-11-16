@@ -1,12 +1,12 @@
 ﻿# Repository Guidelines
 
 ## Project Structure & Module Organization
-This repo tracks the AI-first study desktop app scoped in `PLAN.md`. Keep new code grouped by surfaces: `apps/desktop` for the SolidJS + Tauri client, `services/api` for Hono Cloudflare Workers, and `packages/shared` for cross-cutting schema and utilities. Co-locate feature code (component, styles, hooks, tests) under a single folder, and keep test data/fixtures beside the code that uses them.
+This repo tracks the AI-first study Tauri app scoped in `PLAN.md`. Keep new code grouped by surfaces: `app` for the SolidJS + Tauri client, `services/api` for Hono Cloudflare Workers, and `packages/shared` for cross-cutting schema and utilities. Co-locate feature code (component, styles, hooks, tests) under a single folder, and keep test data/fixtures beside the code that uses them.
 
 ## Build, Test, and Development Commands
 Use `pnpm` for installs and scripts to keep lockfiles consistent. Typical scripts to add and rely on:
 - `pnpm install`: install dependencies.
-- `pnpm tauri dev`: run the desktop app with hot reload.
+- `pnpm tauri dev`: run the Tauri app with hot reload.
 - `pnpm run dev:api`: start the Hono worker locally (via Wrangler/Miniflare).
 - `pnpm run build`: create release bundles for app + worker.
 - `pnpm run lint`: run ESLint/Prettier formatting checks.
