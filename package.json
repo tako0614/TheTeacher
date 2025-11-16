@@ -14,7 +14,13 @@
     "db:generate": "pnpm dlx prisma generate --schema packages/shared/prisma/schema.prisma"
   },
   "devDependencies": {
-    "prisma": "^6.19.0"
+    "@eslint/js": "^9.14.0",
+    "eslint": "^9.14.0",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-plugin-solid": "^0.14.3",
+    "prettier": "^3.3.3",
+    "prisma": "^6.19.0",
+    "typescript-eslint": "^8.11.0"
   },
   "dependencies": {
     "@prisma/client": "6.19.0"
