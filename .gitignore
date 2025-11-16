@@ -1,0 +1,20 @@
+# dependencies
+node_modules
+.pnpm-store
+
+# build outputs
+dist
+.wrangler
+
+# env/config
+.env
+.env.*
+!.env.example
+.env.local
+
+# prisma
+packages/shared/prisma/dev.db
+packages/shared/prisma/test.db
+
+# misc
+.DS_Store

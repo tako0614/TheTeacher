@@ -1,0 +1,130 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+/// 学習ユニット
+model Learning {
+  id                String             @id @default(uuid())
+  title             String
+  subject           String?
+  tags              Json?
+  progress          Float?
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  materials         Material[]
+  generatedContents GeneratedContent[]
+  practiceSessions  PracticeSession[]
+
+  @@index([subject])
+  @@index([createdAt])
+  @@index([updatedAt])
+}
+
+/// 教材メタ
+model Material {
+  id         String    @id @default(uuid())
+  learningId String
+  type       MaterialType
+  sourcePath String?
+  rawContent String?
+  metadata   Json?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  learning   Learning  @relation(fields: [learningId], references: [id], onDelete: Cascade)
+  generated  GeneratedContent[]
+
+  @@index([learningId])
+  @@index([type])
+}
+
+/// 生成コンテンツ（Q&A、要約など）
+model GeneratedContent {
+  id           String                @id @default(uuid())
+  learningId   String
+  materialId   String?
+  type         GeneratedContentType
+  content      Json
+  promptPreset String?
+  createdAt    DateTime              @default(now())
+  learning     Learning              @relation(fields: [learningId], references: [id], onDelete: Cascade)
+  material     Material?             @relation(fields: [materialId], references: [id], onDelete: SetNull)
+  sessions     PracticeSession[]
+
+  @@index([learningId])
+  @@index([type])
+  @@index([materialId])
+}
+
+/// 演習履歴
+model PracticeSession {
+  id                 String            @id @default(uuid())
+  learningId         String
+  generatedContentId String?
+  questionRef        Json?
+  answerText         String
+  isCorrect          Boolean?
+  feedback           Json?
+  score              Float?
+  createdAt          DateTime          @default(now())
+  learning           Learning          @relation(fields: [learningId], references: [id], onDelete: Cascade)
+  generatedContent   GeneratedContent? @relation(fields: [generatedContentId], references: [id], onDelete: SetNull)
+
+  @@index([learningId])
+  @@index([generatedContentId])
+  @@index([createdAt])
+}
+
+/// プロンプトプリセット
+model Preset {
+  id                      String   @id @default(uuid())
+  subject                 String
+  title                   String
+  systemPrompt            String
+  userInstructionTemplate String
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  @@index([subject])
+  @@index([title])
+}
+
+/// セマンティックノード（将来的な拡張）
+model SemanticNode {
+  id       String     @id @default(uuid())
+  refType  RefType
+  refId    String
+  embedding Bytes?
+  metadata Json?
+
+  @@index([refType])
+  @@index([refId])
+}
+
+enum MaterialType {
+  text
+  pdf
+  image
+  audio
+  video
+  url
+}
+
+enum GeneratedContentType {
+  qa
+  practice
+  summary
+  podcast_script
+  other
+}
+
+enum RefType {
+  learning
+  material
+  generated_content
+  question
+}
