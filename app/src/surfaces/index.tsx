@@ -1,15 +1,21 @@
+import { A, useNavigate, useSearchParams } from "@solidjs/router";
 import {
   For,
   Show,
+  createEffect,
   createMemo,
+  createResource,
   createSignal,
   onMount,
   type Component,
 } from "solid-js";
 import {
+  type GeneratedContentType,
   type IngestJob,
+  type GeneratedContent,
   type MaterialIngestRequest,
   type MaterialLibraryConfig,
+  type MaterialType,
   type Preset,
 } from "@theteacher/shared";
 
@@ -26,49 +32,22 @@ import {
   proxyChat,
   semanticSearch,
 } from "../lib/ai";
+import {
+  createContent,
+  createLearning,
+  createMaterial,
+  createSession,
+  fetchContents,
+  fetchLearnings,
+  fetchLearning,
+  fetchMaterials,
+  fetchSessions,
+  fetchSnapshot,
+  replaceSnapshot,
+  type SnapshotPayload,
+} from "../lib/api-client";
 import { buildBackupSnapshot, downloadSnapshot, parseSnapshotFile } from "../lib/backup";
 import { useSettings } from "../lib/settings-store";
-import { useLocalDb } from "../local-db";
-
-type LearningCard = {
-  id: string;
-  title: string;
-  subject: string;
-  tags: string[];
-  progress: number;
-  lastStudied: string;
-  generated: { qa: number; practice: number; summary: number };
-};
-
-const learningCards: LearningCard[] = [
-  {
-    id: "l1",
-    title: "高校数学I_二次関数_第1回",
-    subject: "math",
-    tags: ["二次関数", "基礎"],
-    progress: 0.42,
-    lastStudied: "2024-11-02 21:00",
-    generated: { qa: 6, practice: 2, summary: 1 },
-  },
-  {
-    id: "l2",
-    title: "英語長文_時制の一致",
-    subject: "english",
-    tags: ["読解", "文法"],
-    progress: 0.68,
-    lastStudied: "2024-11-01 10:15",
-    generated: { qa: 10, practice: 4, summary: 2 },
-  },
-  {
-    id: "l3",
-    title: "物理_電磁気_公式暗記リスト",
-    subject: "science",
-    tags: ["暗記", "電磁気"],
-    progress: 0.2,
-    lastStudied: "2024-10-30 07:30",
-    generated: { qa: 3, practice: 0, summary: 0 },
-  },
-];
 
 const subjects = [
   { id: "all", label: "すべて" },
@@ -78,19 +57,75 @@ const subjects = [
   { id: "programming", label: "プログラミング" },
 ];
 
+const subjectLabel = (value?: string | null) =>
+  subjects.find((item) => item.id === value)?.label ?? value ?? "未設定";
+
+const formatDateTime = (value?: string | null) => {
+  if (!value) return "記録なし";
+  const date = new Date(value);
+  const yyyy = date.getFullYear();
+  const mm = `${date.getMonth() + 1}`.padStart(2, "0");
+  const dd = `${date.getDate()}`.padStart(2, "0");
+  const hh = `${date.getHours()}`.padStart(2, "0");
+  const min = `${date.getMinutes()}`.padStart(2, "0");
+  return `${yyyy}-${mm}-${dd} ${hh}:${min}`;
+};
+
+const progressPercent = (value?: number | null) =>
+  Math.round((value ?? 0) * 100);
+
+const generatedTypeLabels: Record<GeneratedContentType, string> = {
+  qa: "一問一答",
+  practice: "練習問題",
+  summary: "要約",
+  podcast_script: "ポッドキャスト",
+  other: "その他",
+};
+
+const detailTabs = [
+  { id: "qa", label: generatedTypeLabels.qa },
+  { id: "practice", label: generatedTypeLabels.practice },
+  { id: "summary", label: generatedTypeLabels.summary },
+  { id: "podcast_script", label: generatedTypeLabels.podcast_script },
+];
+
 const LearningListSurface: Component = () => {
+  const navigate = useNavigate();
   const [query, setQuery] = createSignal("");
   const [subject, setSubject] = createSignal("all");
+  const [newTitle, setNewTitle] = createSignal("");
+  const [newSubject, setNewSubject] = createSignal("");
+  const [newTags, setNewTags] = createSignal("");
 
-  const filtered = createMemo(() =>
-    learningCards.filter((card) => {
-      const matchesSubject = subject() === "all" || card.subject === subject();
-      const matchesQuery =
-        card.title.includes(query()) ||
-        card.tags.some((tag) => tag.includes(query()));
-      return matchesSubject && (query().length === 0 || matchesQuery);
+  const [learnings, { refetch }] = createResource(
+    () => ({
+      q: query().trim() || undefined,
+      subject: subject() === "all" ? undefined : subject(),
     }),
+    (params) => fetchLearnings({ ...params, limit: 100 }),
   );
+
+  const cards = createMemo(() => learnings() ?? []);
+
+  const createLearningCard = async () => {
+    const title = newTitle().trim();
+    if (!title) return;
+    const learning = await createLearning({
+      title,
+      subject: newSubject().trim() || undefined,
+      tags: newTags()
+        .split(",")
+        .map((tag) => tag.trim())
+        .filter(Boolean),
+    });
+    refetch();
+    setNewTitle("");
+    setNewSubject("");
+    setNewTags("");
+    navigate(`/learning-detail?id=${learning.id}`);
+  };
+
+  const openDetail = (id: string) => navigate(`/learning-detail?id=${id}`);
 
   return (
     <section class="space-y-6">
@@ -103,14 +138,17 @@ const LearningListSurface: Component = () => {
             学習カードで進捗と生成物をざっと眺める
           </h1>
           <p class="text-sm text-slate-600">
-            フィルタと検索で対象を絞り込みつつ、演習や詳細へすぐに飛べるようにします。
+            PLAN.mdのセクション3に合わせて、フィルタ・検索と詳細導線を先に整えました。バックエンドAPIに保存されたLearningをそのまま一覧化しています。
           </p>
         </div>
         <div class="flex gap-2">
           <button class="rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50">
             インポート
           </button>
-          <button class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-500">
+          <button
+            class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-500"
+            onClick={createLearningCard}
+          >
             + 学習を作成
           </button>
         </div>
@@ -142,96 +180,129 @@ const LearningListSurface: Component = () => {
             />
           </div>
 
-          <div class="mt-4 grid gap-3 md:grid-cols-2">
-            <For each={filtered()}>
-              {(card) => (
-                <article class="flex flex-col gap-3 rounded-xl border border-slate-200 bg-slate-50/60 p-4">
-                  <div class="flex items-start justify-between gap-2">
-                    <div>
-                      <p class="text-xs font-semibold uppercase text-slate-500">
-                        {card.subject}
-                      </p>
-                      <h2 class="text-lg font-bold text-slate-900">
-                        {card.title}
-                      </h2>
-                      <div class="mt-1 flex flex-wrap gap-2 text-xs">
-                        <For each={card.tags}>
-                          {(tag) => (
-                            <span class="rounded-full bg-white px-2 py-1 text-slate-600 shadow-sm">
-                              {tag}
-                            </span>
-                          )}
-                        </For>
+          <Show
+            when={cards().length > 0}
+            fallback={
+              <div class="mt-4 rounded-lg border border-dashed border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
+                条件に合致する学習がありません。タイトルやタグを変えて再検索してください。
+              </div>
+            }
+          >
+            <div class="mt-4 grid gap-3 md:grid-cols-2">
+              <For each={cards()}>
+                {(learning) => (
+                  <article class="flex flex-col gap-3 rounded-xl border border-slate-200 bg-slate-50/60 p-4">
+                    <div class="flex items-start justify-between gap-2">
+                      <div>
+                        <p class="text-xs font-semibold uppercase text-slate-500">
+                          {subjectLabel(learning.subject)}
+                        </p>
+                        <h2 class="text-lg font-bold text-slate-900">
+                          {learning.title}
+                        </h2>
+                        <div class="mt-1 flex flex-wrap gap-2 text-xs">
+                          <For each={learning.tags ?? []}>
+                            {(tag) => (
+                              <span class="rounded-full bg-white px-2 py-1 text-slate-600 shadow-sm">
+                                {tag}
+                              </span>
+                            )}
+                          </For>
+                        </div>
+                      </div>
+                      <div class="text-right">
+                        <p class="text-xs text-slate-500">最終学習</p>
+                        <p class="text-sm font-semibold text-slate-800">
+                          {formatDateTime(learning.lastStudiedAt ?? learning.updatedAt)}
+                        </p>
                       </div>
                     </div>
-                    <div class="text-right">
-                      <p class="text-xs text-slate-500">最終学習</p>
-                      <p class="text-sm font-semibold text-slate-800">
-                        {card.lastStudied}
-                      </p>
-                    </div>
-                  </div>
 
-                  <div class="space-y-2">
-                    <div class="flex items-center justify-between text-xs font-semibold text-slate-700">
-                      <span>進捗</span>
-                      <span>{Math.round(card.progress * 100)}%</span>
+                    <div class="space-y-2">
+                      <div class="flex items-center justify-between text-xs font-semibold text-slate-700">
+                        <span>進捗（演習平均）</span>
+                        <span>{progressPercent(learning.progress)}%</span>
+                      </div>
+                      <div class="h-2 rounded-full bg-white">
+                        <div
+                          class="h-2 rounded-full bg-indigo-500 transition-all"
+                          style={{ width: `${progressPercent(learning.progress)}%` }}
+                        />
+                      </div>
                     </div>
-                    <div class="h-2 rounded-full bg-white">
-                      <div
-                        class="h-2 rounded-full bg-indigo-500 transition-all"
-                        style={{ width: `${card.progress * 100}%` }}
-                      />
-                    </div>
-                  </div>
 
-                  <div class="flex items-center gap-3 text-xs text-slate-600">
-                    <div class="flex items-center gap-1 rounded-md bg-white px-2 py-1 shadow-sm">
-                      <span class="font-semibold text-indigo-700">Q&A</span>
-                      <span>{card.generated.qa}</span>
+                    <div class="flex flex-wrap items-center gap-3 text-xs text-slate-600">
+                      <div class="flex items-center gap-1 rounded-md bg-white px-2 py-1 shadow-sm">
+                        <span class="font-semibold text-indigo-700">生成</span>
+                        <span>{learning.generatedCount}</span>
+                      </div>
+                      <div class="flex items-center gap-1 rounded-md bg-white px-2 py-1 shadow-sm">
+                        <span class="font-semibold text-emerald-700">
+                          演習
+                        </span>
+                        <span>{learning.sessionCount}</span>
+                      </div>
+                      <div class="flex items-center gap-1 rounded-md bg-white px-2 py-1 shadow-sm">
+                        <span class="font-semibold text-slate-700">教材</span>
+                        <span>{learning.materialsCount}</span>
+                      </div>
                     </div>
-                    <div class="flex items-center gap-1 rounded-md bg-white px-2 py-1 shadow-sm">
-                      <span class="font-semibold text-emerald-700">
-                        練習
-                      </span>
-                      <span>{card.generated.practice}</span>
-                    </div>
-                    <div class="flex items-center gap-1 rounded-md bg-white px-2 py-1 shadow-sm">
-                      <span class="font-semibold text-amber-700">
-                        要約
-                      </span>
-                      <span>{card.generated.summary}</span>
-                    </div>
-                  </div>
 
-                  <div class="flex flex-wrap gap-2">
-                    <button class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-white">
-                      詳細を開く
-                    </button>
-                    <button class="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-100">
-                      演習に進む
-                    </button>
-                    <button class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-white">
-                      生成履歴
-                    </button>
-                  </div>
-                </article>
-              )}
-            </For>
-          </div>
+                    <div class="flex flex-wrap gap-2">
+                      <button
+                        class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-white"
+                        onClick={() => openDetail(learning.id)}
+                      >
+                        詳細を開く
+                      </button>
+                      <button class="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-100">
+                        演習に進む
+                      </button>
+                      <button class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-white">
+                        生成履歴
+                      </button>
+                    </div>
+                  </article>
+                )}
+              </For>
+            </div>
+          </Show>
         </div>
 
         <aside class="space-y-3">
           <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-            <p class="text-xs font-semibold uppercase text-slate-500">次の提案</p>
-            <ul class="mt-2 space-y-2 text-sm text-slate-700">
-              <li>・未着手の「電磁気」カードにQ&Aを追加生成</li>
-              <li>・英語長文の演習モードを再開</li>
-              <li>・数学Iのポッドキャストスクリプトを作成</li>
-            </ul>
+            <p class="text-xs font-semibold uppercase text-slate-500">
+              新規学習
+            </p>
+            <div class="mt-2 space-y-2 text-sm text-slate-700">
+              <input
+                value={newTitle()}
+                onInput={(e) => setNewTitle(e.currentTarget.value)}
+                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-indigo-300 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+                placeholder="タイトル（必須）"
+              />
+              <input
+                value={newSubject()}
+                onInput={(e) => setNewSubject(e.currentTarget.value)}
+                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-indigo-300 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+                placeholder="教科（math, english など）"
+              />
+              <input
+                value={newTags()}
+                onInput={(e) => setNewTags(e.currentTarget.value)}
+                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-indigo-300 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+                placeholder="タグ（カンマ区切り）"
+              />
+              <button
+                class="w-full rounded-lg bg-indigo-600 px-3 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-500"
+                onClick={createLearningCard}
+              >
+                追加して詳細へ進む
+              </button>
+            </div>
           </div>
           <div class="rounded-xl border border-indigo-100 bg-indigo-50 p-4 shadow-sm text-sm text-indigo-900">
-            教科タグで絞りながら、新規学習やチャット画面にすぐに遷移できる導線を用意しています。
+            教科タグで絞り込み＆全文検索を最初に用意しました。カードから詳細・演習・生成へすぐ遷移できるMVPの導線です。
           </div>
         </aside>
       </div>
@@ -239,143 +310,215 @@ const LearningListSurface: Component = () => {
   );
 };
 
-const detailTabs = [
-  { id: "qa", label: "一問一答" },
-  { id: "practice", label: "練習問題" },
-  { id: "summary", label: "要約" },
-  { id: "podcast", label: "ポッドキャスト" },
-];
-
-const generatedSamples = {
-  qa: [
-    {
-      id: "qa1",
-      title: "平方完成の確認",
-      createdAt: "2024-11-02 21:10",
-      preview: "二次関数 f(x)=x^2+4x+5 の頂点を求めよ。",
-    },
-    {
-      id: "qa2",
-      title: "図形と範囲の理解",
-      createdAt: "2024-11-02 21:20",
-      preview: "グラフの軸と最小値を説明してください。",
-    },
-  ],
-  practice: [
-    {
-      id: "pr1",
-      title: "基本計算セット",
-      createdAt: "2024-10-31 09:05",
-      preview: "軸と頂点、判別式の扱いを含む3問セット。",
-    },
-  ],
-  summary: [
-    {
-      id: "sm1",
-      title: "要約 v2",
-      createdAt: "2024-10-30 18:20",
-      preview: "二次関数の基本形とグラフ変形のポイントを短く整理。",
-    },
-  ],
-  podcast: [],
-};
-
 const LearningDetailSurface: Component = () => {
-  const [tab, setTab] = createSignal(detailTabs[0].id);
+  const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [tab, setTab] = createSignal<GeneratedContentType>(
+    detailTabs[0].id as GeneratedContentType,
+  );
   const [selectedPreset, setSelectedPreset] = createSignal(
     materialIngestPresets[0].id,
   );
   const [libraryConfig, setLibraryConfig] =
     createSignal<MaterialLibraryConfig>();
   const [ingestQueue, setIngestQueue] = createSignal<IngestJob[]>([]);
+  const [materialType, setMaterialType] =
+    createSignal<MaterialType>("text");
+  const [materialText, setMaterialText] = createSignal("");
+  const [materialFileName, setMaterialFileName] = createSignal("");
+  const [materialBytes, setMaterialBytes] = createSignal<number | undefined>();
+  const [saveMessage, setSaveMessage] = createSignal<string | null>(null);
 
-  const seedJob = (
-    request: MaterialIngestRequest,
-    config: MaterialLibraryConfig,
-    runningIndex = 1,
-  ) => {
-    const job = bootstrapJobFromRequest(request, config, "processing");
-    job.steps = job.steps.map((step, index) =>
-      index < runningIndex
-        ? { ...step, status: "succeeded" }
-        : index === runningIndex
-          ? { ...step, status: "running" }
-          : step,
-    );
-    return job;
-  };
-
-  const enqueuePreset = () => {
-    const config = libraryConfig();
-    const preset = materialIngestPresets.find(
-      (item) => item.id === selectedPreset(),
-    );
-    if (!config || !preset) return;
-
-    const request: MaterialIngestRequest = {
-      ...preset.request,
-      source:
-        preset.request.source.kind === "url"
-          ? {
-              ...preset.request.source,
-              url:
-                preset.request.source.url ||
-                "https://example.com/article-to-import",
-            }
-          : {
-              ...preset.request.source,
-              path:
-                preset.request.source.kind === "image"
-                  ? "スクリーンショット.png"
-                  : "選択したファイル",
-            },
-    };
-
-    const job = bootstrapJobFromRequest(request, config, "queued");
-    setIngestQueue([job, ...ingestQueue()]);
-  };
-
-  const sourceLabel = (job: IngestJob) =>
-    job.source.kind === "url" ? job.source.url : job.source.path;
+  const [learningList] = createResource(() => true, () =>
+    fetchLearnings({ limit: 50 }),
+  );
+  const [learning] = createResource(
+    () => searchParams.id ?? learningList()?.[0]?.id,
+    (id) => (id ? fetchLearning(id) : undefined),
+  );
+  const [materials, { refetch: refetchMaterials }] = createResource(
+    () => learning()?.id,
+    (id) => (id ? fetchMaterials(id).then((res) => res.items) : []),
+  );
+  const [generatedContents, { refetch: refetchContents }] = createResource(
+    () => learning()?.id,
+    (id) => (id ? fetchContents(id).then((res) => res.items) : []),
+  );
+  const [practiceSessions] = createResource(
+    () => learning()?.id,
+    (id) => (id ? fetchSessions(id).then((res) => res.items) : []),
+  );
 
   const formatBytes = (value?: number) =>
-    value ? `${Math.round(value / 1000)} KB` : "サイズ不明";
+    value ? `${Math.round(value / 1024)} KB` : "サイズ不明";
 
-  onMount(async () => {
-    const config = await resolveLibraryConfig();
-    setLibraryConfig(config);
-
-    const pdfPreset = materialIngestPresets.find((preset) => preset.id === "pdf");
-    const audioPreset = materialIngestPresets.find(
-      (preset) => preset.id === "audio",
-    );
-
-    if (pdfPreset && audioPreset) {
-      const pdfJob = seedJob(
-        {
-          ...pdfPreset.request,
-          source: { kind: "pdf", path: "math/二次関数_講義.pdf" },
+  const generatedByType = createMemo(
+    () =>
+      (generatedContents() ?? []).reduce(
+        (acc, item) => {
+          const key = item.type ?? "other";
+          acc[key] = [...(acc[key] ?? []), item];
+          return acc;
         },
-        config,
-        2,
-      );
-      const audioJob = seedJob(
-        {
-          ...audioPreset.request,
-          source: { kind: "audio", path: "audio/podcast.wav" },
-        },
-        config,
-        1,
-      );
-      setIngestQueue([pdfJob, audioJob]);
+        {} as Record<GeneratedContentType, GeneratedContent[]>,
+      ),
+  );
+
+  createEffect(() => {
+    const list = learningList();
+    if (!searchParams.id && list?.length) {
+      setSearchParams({ id: list[0].id });
     }
   });
 
-  const renderEmpty = () => (
-    <div class="rounded-lg border border-dashed border-slate-200 bg-stone-50 px-4 py-6 text-sm text-slate-700">
-      まだ生成されたコンテンツがありません。教材から生成を実行してください。
-    </div>
-  );
+  createEffect(() => {
+    const current = learning();
+    if (current && searchParams.id !== current.id) {
+      setSearchParams({ id: current.id });
+    }
+  });
+
+  onMount(async () => {
+    setLibraryConfig(await resolveLibraryConfig());
+  });
+
+  const previewContent = (content: Record<string, unknown>) => {
+    if (typeof content.title === "string") return content.title;
+    if (typeof content.preview === "string") return content.preview;
+    return JSON.stringify(content).slice(0, 80);
+  };
+
+  const materialSource = () => {
+    if (materialType() === "text") return "テキスト入力";
+    if (materialFileName()) return materialFileName();
+    return "ファイル未選択";
+  };
+
+  const enqueueIngest = (
+    request: MaterialIngestRequest,
+    config: MaterialLibraryConfig,
+  ) => {
+    const job = bootstrapJobFromRequest(request, config, "queued");
+    setIngestQueue((prev) => [job, ...prev]);
+  };
+
+  const handleAddMaterial = async () => {
+    const target = learning();
+    const config = libraryConfig();
+    if (!target || !config) return;
+
+    const rawContent =
+      materialType() === "text" ? materialText().trim() || undefined : undefined;
+    const material = await createMaterial({
+      learningId: target.id,
+      type: materialType(),
+      sourcePath: materialSource(),
+      rawContent,
+      metadata: {
+        name: materialFileName() || undefined,
+        bytes: materialBytes(),
+      },
+    });
+
+    const source: MaterialIngestRequest["source"] =
+      material.type === "text"
+        ? {
+            kind: "text",
+            text: rawContent ?? material.sourcePath ?? "テキスト",
+          }
+        : material.type === "url"
+          ? { kind: "url", url: material.sourcePath ?? "https://example.com" }
+          : {
+              kind: material.type as Exclude<MaterialType, "text" | "url">,
+              path: material.sourcePath ?? material.metadata?.name ?? "教材ファイル",
+            };
+
+    enqueueIngest(
+      { source, learningId: material.learningId, preferOffline: true },
+      config,
+    );
+    setMaterialText("");
+    setMaterialFileName("");
+    setMaterialBytes(undefined);
+    await refetchMaterials();
+    setSaveMessage("教材を追加し、インデックス投入をキューに載せました。");
+  };
+
+  const handleFileInput = async (fileList: FileList | null) => {
+    const file = fileList?.item(0);
+    if (!file) {
+      setMaterialFileName("");
+      setMaterialBytes(undefined);
+      return;
+    }
+    setMaterialFileName(file.name);
+    setMaterialBytes(file.size);
+    if (materialType() === "text") {
+      try {
+        const text = await file.text();
+        setMaterialText(text.slice(0, 4000));
+      } catch {
+        setMaterialText("");
+      }
+    }
+  };
+
+  const addGeneratedDraft = async () => {
+    const target = learning();
+    if (!target) return;
+    const type = tab();
+    await createContent({
+      learningId: target.id,
+      materialId: (materials() ?? [])[0]?.id,
+      type,
+      content: {
+        title: `${generatedTypeLabels[type]}のドラフト`,
+        preview:
+          materialText().slice(0, 120) ||
+          "教材から生成したコンテンツのプレースホルダー",
+      },
+      promptPreset: selectedPreset(),
+    });
+    await refetchContents();
+    setSaveMessage(`${generatedTypeLabels[type]} をバックエンドに保存しました。`);
+  };
+
+  if (!learning()) {
+    return (
+      <section class="space-y-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <p class="text-sm text-slate-700">
+          学習がまだありません。まず「学習一覧」でカードを追加してください。
+        </p>
+        <button
+          class="w-fit rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+          onClick={() => navigate("/")}
+        >
+          学習一覧に戻る
+        </button>
+      </section>
+    );
+  }
+
+  const stats = createMemo(() => {
+    const sessions = practiceSessions() ?? [];
+    const generated = generatedContents() ?? [];
+    const generatedCounts = generated.reduce(
+      (acc, item) => {
+        const key = item.type ?? "other";
+        acc[key] = (acc[key] ?? 0) + 1;
+        return acc;
+      },
+      {} as Record<GeneratedContentType, number>,
+    );
+    const lastStudied =
+      sessions[0]?.createdAt ?? generated[0]?.createdAt ?? learning()?.updatedAt;
+    return {
+      generatedCounts,
+      lastStudied,
+      progress: learning()?.progress ?? 0,
+    };
+  });
+  const selectedTabContents = generatedByType()[tab()] ?? [];
 
   return (
     <section class="space-y-6">
@@ -385,24 +528,33 @@ const LearningDetailSurface: Component = () => {
             学習詳細
           </p>
           <h1 class="text-2xl font-bold text-slate-900">
-            高校数学I_二次関数_第1回
+            {learning()!.title}
           </h1>
           <p class="text-sm text-slate-600">
-            教材に紐づく生成コンテンツをタブで切り替えます。演習への導線と生成履歴を右ペインにまとめました。
+            教材に紐づく生成コンテンツをタブで切り替えます。バックエンドAPIから読み込んだデータを生成・演習の起点にしています。
           </p>
-          <div class="mt-2 flex gap-2 text-xs text-slate-600">
-            <span class="rounded-full bg-slate-100 px-2 py-1">数学</span>
-            <span class="rounded-full bg-slate-100 px-2 py-1">二次関数</span>
-            <span>最終更新: 2024-11-02</span>
+          <div class="mt-2 flex flex-wrap gap-2 text-xs text-slate-600">
+            <span class="rounded-full bg-slate-100 px-2 py-1">
+              {subjectLabel(learning()?.subject)}
+            </span>
+            <For each={learning()?.tags ?? []}>
+              {(tag) => (
+                <span class="rounded-full bg-slate-100 px-2 py-1">{tag}</span>
+              )}
+            </For>
+            <span>最終更新: {formatDateTime(learning()?.updatedAt)}</span>
           </div>
         </div>
         <div class="flex flex-wrap items-center gap-2">
-          <button class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50">
-            教材を追加
-          </button>
-          <button class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50">
-            設定を開く
-          </button>
+          <div class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700">
+            進捗 {progressPercent(stats().progress)}%
+          </div>
+          <A
+            href="/"
+            class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
+          >
+            一覧に戻る
+          </A>
           <button class="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500">
             演習を開始
           </button>
@@ -417,45 +569,59 @@ const LearningDetailSurface: Component = () => {
                 {(item) => (
                   <button
                     class={`rounded-lg px-3 py-2 text-xs font-semibold transition ${
-                      tab() === item.id
+                      tab() === (item.id as GeneratedContentType)
                         ? "bg-indigo-50 text-indigo-700 ring-1 ring-indigo-200"
                         : "text-slate-700 hover:bg-slate-50"
                     }`}
-                    onClick={() => setTab(item.id)}
+                    onClick={() => setTab(item.id as GeneratedContentType)}
                   >
                     {item.label}
                   </button>
                 )}
               </For>
             </div>
-            <button class="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-100">
-              + 生成
+            <button
+              class="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-100"
+              onClick={addGeneratedDraft}
+            >
+              + 生成（モック）
             </button>
           </div>
 
           <div class="mt-4 space-y-3">
-            <Show when={generatedSamples[tab() as keyof typeof generatedSamples].length} fallback={renderEmpty()}>
-              <For each={generatedSamples[tab() as keyof typeof generatedSamples]}>
+            <Show
+              when={selectedTabContents.length > 0}
+              fallback={
+                <div class="rounded-lg border border-dashed border-slate-200 bg-stone-50 px-4 py-6 text-sm text-slate-700">
+                  まだ生成されたコンテンツがありません。教材の追加後に生成してください。
+                </div>
+              }
+            >
+              <For each={selectedTabContents}>
                 {(item) => (
                   <article class="rounded-lg border border-slate-200 bg-slate-50/70 px-4 py-3">
                     <div class="flex items-start justify-between gap-2">
                       <div>
                         <p class="text-xs uppercase text-slate-500">
-                          {tab() === "qa"
-                            ? "Q&A"
-                            : tab() === "practice"
-                              ? "練習問題"
-                              : tab() === "summary"
-                                ? "要約"
-                                : "ポッドキャスト"}
+                          {generatedTypeLabels[item.type ?? "other"]}
                         </p>
                         <h3 class="text-sm font-semibold text-slate-900">
-                          {item.title}
+                          {previewContent(
+                            item.content as Record<string, unknown>,
+                          )}
                         </h3>
-                        <p class="mt-1 text-sm text-slate-700">{item.preview}</p>
+                        <p class="mt-1 text-sm text-slate-700">
+                          {typeof (item.content as Record<string, unknown>)
+                            .preview === "string"
+                            ? (item.content as Record<string, unknown>)
+                                .preview
+                            : "要約・問題などの本文は生成API接続後に差し替え予定"}
+                        </p>
                       </div>
                       <div class="text-right">
-                        <p class="text-xs text-slate-500">{item.createdAt}</p>
+                        <p class="text-xs text-slate-500">
+                          {formatDateTime(item.createdAt)}
+                        </p>
                         <div class="mt-2 flex gap-2">
                           <button class="rounded-md border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-white">
                             詳細
@@ -476,202 +642,258 @@ const LearningDetailSurface: Component = () => {
         <aside class="space-y-3">
           <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
             <p class="text-xs font-semibold uppercase text-slate-500">
+              教材ファイル
+            </p>
+            <div class="mt-2 space-y-2 text-sm text-slate-700">
+              <Show
+                when={(materials() ?? []).length > 0}
+                fallback={
+                  <div class="rounded-md border border-dashed border-slate-200 bg-slate-50 px-3 py-2">
+                    この学習に紐づく教材がまだありません。
+                  </div>
+                }
+              >
+                <For each={materials() ?? []}>
+                  {(material) => (
+                    <div class="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
+                      <div class="flex items-center justify-between">
+                        <span class="font-semibold text-slate-800">
+                          {material.sourcePath ?? material.type}
+                        </span>
+                        <span class="text-xs text-slate-500">
+                          {formatBytes(
+                            (material.metadata as { bytes?: number })?.bytes,
+                          )}
+                        </span>
+                      </div>
+                      <p class="text-xs uppercase text-slate-500">
+                        {material.type}
+                      </p>
+                      <p class="text-sm text-slate-700">
+                        {material.rawContent?.slice(0, 120) ||
+                          "抽出テキストはAI呼び出しで更新します。"}
+                      </p>
+                    </div>
+                  )}
+                </For>
+              </Show>
+            </div>
+          </div>
+
+          <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <p class="text-xs font-semibold uppercase text-slate-500">
               生成履歴
             </p>
             <ul class="mt-2 space-y-2 text-sm text-slate-700">
-              <li>2024-11-02 21:20 練習問題セットを更新</li>
-              <li>2024-11-02 21:10 Q&A 2件生成</li>
-              <li>2024-10-30 18:20 要約 v2 を作成</li>
+              <For each={(generatedContents() ?? []).filter((item) => item.learningId === learning()!.id)}>
+                {(item) => (
+                  <li class="rounded-md bg-slate-50 px-3 py-2">
+                    {formatDateTime(item.createdAt)} {generatedTypeLabels[item.type ?? "other"]}
+                  </li>
+                )}
+              </For>
+              <Show when={(generatedContents() ?? []).filter((item) => item.learningId === learning()!.id).length === 0}>
+                <li class="rounded-md bg-slate-50 px-3 py-2 text-slate-600">
+                  まだ生成履歴がありません。
+                </li>
+              </Show>
             </ul>
           </div>
-          <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-            <p class="text-xs font-semibold uppercase text-slate-500">
-              関連学習
-            </p>
-            <div class="mt-2 space-y-2 text-sm text-slate-700">
-              <div class="rounded-lg bg-slate-50 px-3 py-2">
-                数学II_指数関数_基礎
-              </div>
-              <div class="rounded-lg bg-slate-50 px-3 py-2">
-                物理_運動方程式_演習セット
-              </div>
-            </div>
-          </div>
+
           <div class="rounded-xl border border-indigo-100 bg-indigo-50 p-4 shadow-sm text-sm text-indigo-900">
-            タブ切り替えと生成履歴をまとめ、演習フローへ移動しやすい構成を用意しています。
+            タブ切り替え・教材・生成履歴を一箇所にまとめ、演習フローへ移りやすいMVP版の詳細画面です。
           </div>
         </aside>
       </div>
 
-      <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-        <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-          <div>
-            <p class="text-xs font-semibold uppercase tracking-wide text-indigo-600">
-              教材取り込み & ファイルライブラリ
-            </p>
-            <h2 class="text-lg font-bold text-slate-900">
-              PDF/画像/OCR/音声/URL/動画のパイプライン設計を接続
-            </h2>
-            <p class="text-sm text-slate-600">
-              オフライン優先のTesseract（OCR）と Whisper-rs（文字起こし）を前提に、Tauriコマンドにつなぐキューと保存先を用意しています。
-            </p>
+      <div class="grid gap-4 md:grid-cols-[2fr_1fr]">
+        <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+          <p class="text-xs font-semibold uppercase text-slate-500">
+            教材入力（テキスト/ファイル）
+          </p>
+          <div class="mt-2 grid gap-3 md:grid-cols-2">
+            <div class="space-y-2">
+              <label class="text-xs font-semibold text-slate-600">
+                種別
+              </label>
+              <select
+                value={materialType()}
+                onChange={(e) =>
+                  setMaterialType(e.currentTarget.value as MaterialType)
+                }
+                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-indigo-300 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+              >
+                <For each={["text", "pdf", "image", "audio", "video", "url"] as MaterialType[]}>
+                  {(type) => (
+                    <option value={type}>{type}</option>
+                  )}
+                </For>
+              </select>
+              <input
+                type="file"
+                class="w-full text-sm"
+                onChange={(e) => void handleFileInput(e.currentTarget.files)}
+              />
+              <input
+                value={materialFileName()}
+                onInput={(e) => setMaterialFileName(e.currentTarget.value)}
+                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-indigo-300 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+                placeholder="ファイル名 / URL / パス"
+              />
+            </div>
+            <div class="space-y-2">
+              <label class="text-xs font-semibold text-slate-600">
+                テキスト入力
+              </label>
+              <textarea
+                value={materialText()}
+                onInput={(e) => setMaterialText(e.currentTarget.value)}
+                class="h-32 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-indigo-300 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+                placeholder="教材の本文を貼り付け（テキスト種別時に保存）"
+              />
+              <div class="text-xs text-slate-500">
+                {materialType() === "text"
+                  ? "テキストはAPI経由で即保存します。非テキストはパスのみを記録します。"
+                  : "PDF/画像/音声はパス・ファイル名を記録し、OCR/文字起こしは後段のAIで処理します。"}
+              </div>
+            </div>
           </div>
-          <div class="flex flex-wrap items-center gap-2">
-            <select
-              class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 focus:border-indigo-300 focus:outline-none focus:ring-2 focus:ring-indigo-100"
-              value={selectedPreset()}
-              onChange={(event) => setSelectedPreset(event.currentTarget.value)}
-            >
-              <For each={materialIngestPresets}>
-                {(preset) => <option value={preset.id}>{preset.label}</option>}
-              </For>
-            </select>
+          <div class="mt-3 flex flex-wrap items-center justify-between gap-3">
+            <div class="text-xs text-slate-600">
+              追加先: {learning()?.title} / {materialSource()}・
+              {materialBytes() ? formatBytes(materialBytes()) : "サイズ未計測"}
+            </div>
             <button
-              class="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500"
-              onClick={enqueuePreset}
+              class="rounded-lg bg-indigo-600 px-4 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500"
+              onClick={handleAddMaterial}
             >
-              キューに追加
+              教材を保存
             </button>
           </div>
+          <Show when={saveMessage()}>
+            <div class="mt-2 rounded-md bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
+              {saveMessage()}
+            </div>
+          </Show>
         </div>
 
-        <div class="mt-4 grid gap-4 md:grid-cols-2">
-          <div class="space-y-3 rounded-lg border border-slate-200 bg-slate-50/70 p-3">
-            <div class="flex items-center justify-between">
-              <p class="text-xs font-semibold uppercase text-slate-500">
-                取り込みキュー（スタブ）
-              </p>
-              <span class="rounded-full bg-white px-2 py-1 text-xs font-semibold text-slate-700">
-                {ingestQueue().length} 件
-              </span>
-            </div>
-            <Show
-              when={ingestQueue().length}
-              fallback={
-                <p class="text-sm text-slate-600">
-                  まだキューはありません。上のプルダウンから種別を選びキューに追加します。
-                </p>
-              }
-            >
-              <div class="space-y-2">
+        <div class="space-y-3">
+          <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <p class="text-xs font-semibold uppercase text-slate-500">
+              インデックス投入キュー
+            </p>
+            <div class="mt-2 space-y-2 text-sm text-slate-700">
+              <Show
+                when={ingestQueue().length > 0}
+                fallback={
+                  <div class="rounded-md border border-dashed border-slate-200 bg-slate-50 px-3 py-2">
+                    追加した教材をここで管理します（Tauriコマンド接続前のスタブ）。
+                  </div>
+                }
+              >
                 <For each={ingestQueue()}>
                   {(job) => (
-                    <div class="rounded-lg border border-slate-200 bg-white p-3">
-                      <div class="flex items-start justify-between gap-2">
-                        <div>
-                          <p class="text-xs font-semibold uppercase text-slate-500">
-                            {job.source.kind}
-                          </p>
-                          <p class="text-sm font-semibold text-slate-900">
-                            {sourceLabel(job)}
-                          </p>
-                          <p class="text-xs text-slate-500">
-                            OCR: {job.preferredOcrEngine || "未指定"} / STT:{" "}
-                            {job.preferredTranscriptionEngine || "未指定"}
-                          </p>
-                        </div>
-                        <span
-                          class={`rounded-full px-2 py-1 text-xs font-semibold ${
-                            job.status === "completed"
-                              ? "bg-emerald-100 text-emerald-700"
-                              : job.status === "processing"
-                                ? "bg-indigo-100 text-indigo-700"
-                                : "bg-amber-100 text-amber-700"
-                          }`}
-                        >
+                    <div class="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
+                      <div class="flex items-center justify-between">
+                        <span class="font-semibold text-slate-800">
+                          {job.source.kind === "text"
+                            ? "テキスト"
+                            : job.source.kind.toUpperCase()}
+                        </span>
+                        <span class="text-xs text-slate-500">
                           {job.status}
                         </span>
                       </div>
-                      <div class="mt-2 space-y-1">
+                      <p class="text-xs text-slate-500">
+                        {job.source.kind === "url"
+                          ? job.source.url
+                          : job.source.kind === "text"
+                            ? (job.source.text?.slice(0, 40) ?? "テキスト")
+                            : job.source.path}
+                      </p>
+                      <div class="mt-1 flex flex-wrap gap-1">
                         <For each={job.steps}>
                           {(step) => (
-                            <div class="flex items-center justify-between rounded-md bg-slate-50 px-2 py-1 text-xs">
-                              <span class="font-semibold text-slate-700">
-                                {step.label}
-                              </span>
-                              <span
-                                class={`rounded-full px-2 py-0.5 ${
-                                  step.status === "succeeded"
-                                    ? "bg-emerald-100 text-emerald-700"
-                                    : step.status === "running"
-                                      ? "bg-indigo-100 text-indigo-700"
-                                      : step.status === "failed"
-                                        ? "bg-rose-100 text-rose-700"
-                                        : "bg-slate-100 text-slate-600"
-                                }`}
-                              >
-                                {step.status}
-                              </span>
-                            </div>
+                            <span
+                              class={`rounded-full px-2 py-1 text-[10px] font-semibold uppercase ${
+                                step.status === "succeeded"
+                                  ? "bg-emerald-50 text-emerald-700"
+                                  : step.status === "running"
+                                    ? "bg-indigo-50 text-indigo-700"
+                                    : "bg-slate-100 text-slate-600"
+                              }`}
+                            >
+                              {step.label}
+                            </span>
                           )}
                         </For>
                       </div>
                     </div>
                   )}
                 </For>
-              </div>
-            </Show>
-            <p class="text-xs text-slate-500">
-              Tauri側では `materials::ingest` コマンドでステップを更新予定。`native_tesseract` / `whisper_rs` をデフォルトに、必要なら `cloudflare_workers_ai` に切替できるようにフィールドを持たせています。
-            </p>
+              </Show>
+            </div>
           </div>
 
-          <div class="space-y-3 rounded-lg border border-slate-200 bg-slate-50/50 p-3">
-            <div class="flex items-center justify-between">
-              <div>
-                <p class="text-xs font-semibold uppercase text-slate-500">
-                  保存先とインデックス
-                </p>
-                <p class="text-sm text-slate-700">
-                  AppData（BaseDirectory.AppData）配下に TheTeacher/materials を確保。
-                </p>
-              </div>
-              <span class="rounded-full bg-white px-2 py-1 text-xs font-semibold text-slate-700">
-                {libraryConfig()?.rootDir || "AppData/TheTeacher/materials"}
-              </span>
-            </div>
-            <div class="space-y-1 rounded-md bg-white p-3 text-xs text-slate-700 shadow-sm">
-              <div class="flex items-center justify-between">
-                <span>ルート</span>
-                <span class="font-semibold">
-                  {libraryConfig()?.rootDir || "AppData/TheTeacher/materials"}
-                </span>
-              </div>
-              <div class="flex items-center justify-between">
-                <span>一時保存</span>
-                <span class="font-semibold">
-                  {libraryConfig()?.tempDir || "AppData/TheTeacher/materials/tmp"}
-                </span>
-              </div>
-              <div class="flex items-center justify-between">
-                <span>インデックス</span>
-                <span class="font-semibold">
-                  {libraryConfig()?.indexFile ||
-                    "AppData/TheTeacher/materials/material-index.json"}
-                </span>
-              </div>
-            </div>
-            <div>
-              <p class="text-xs font-semibold uppercase text-slate-500">
-                ライブラリサンプル（JSONインデックス）
+          <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <p class="text-xs font-semibold uppercase text-slate-500">
+              プリセット / 生成パラメータ
+            </p>
+            <div class="mt-2 space-y-2 text-sm text-slate-700">
+              <select
+                value={selectedPreset()}
+                onChange={(e) => setSelectedPreset(e.currentTarget.value)}
+                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-indigo-300 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+              >
+                <For each={materialIngestPresets}>
+                  {(preset) => (
+                    <option value={preset.id}>{preset.label}</option>
+                  )}
+                </For>
+              </select>
+              <p class="text-xs text-slate-500">
+                AI API接続前はプリセットをUI上で選択できるだけにしています。Tauri fetch plugin経由でCORS回避しつつAPIを叩く想定です。
               </p>
-              <div class="mt-2 space-y-2">
-                <For each={sampleLibraryEntries}>
-                  {(entry) => (
-                    <div class="flex items-center justify-between rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700">
-                      <div>
-                        <p class="font-semibold">{entry.displayName}</p>
-                        <p class="text-xs text-slate-500">
-                          {entry.storedPath} ・ {entry.type}
-                        </p>
+            </div>
+          </div>
+
+          <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <p class="text-xs font-semibold uppercase text-slate-500">
+              直近の演習
+            </p>
+            <div class="mt-2 space-y-2 text-sm text-slate-700">
+              <Show
+                when={practiceSessions().length > 0}
+                fallback={
+                  <p class="text-slate-600">演習履歴がまだありません。</p>
+                }
+              >
+                <For each={practiceSessions()}>
+                  {(session) => (
+                    <div class="rounded-md bg-slate-50 px-3 py-2">
+                      <div class="flex items-center justify-between">
+                        <span class="font-semibold text-slate-800">
+                          {session.questionRef?.title ?? "演習"}
+                        </span>
+                        <span class="text-xs text-slate-500">
+                          {formatDateTime(session.createdAt)}
+                        </span>
                       </div>
-                      <span class="text-xs text-slate-600">
-                        {formatBytes(entry.bytes)}
-                      </span>
+                      <p class="text-sm text-slate-700">
+                        {session.answerText}
+                      </p>
+                      <p class="text-xs text-slate-500">
+                        {session.isCorrect
+                          ? "正解"
+                          : session.isCorrect === false
+                            ? "不正解"
+                            : "採点待ち"}
+                        ・score: {session.score ?? "-"}
+                      </p>
                     </div>
                   )}
                 </For>
-              </div>
+              </Show>
             </div>
           </div>
         </div>
@@ -679,6 +901,7 @@ const LearningDetailSurface: Component = () => {
     </section>
   );
 };
+
 
 const PracticeSurface: Component = () => {
   const [mode, setMode] = createSignal<"handwriting" | "text">("text");
@@ -1365,7 +1588,6 @@ const NewLearningSurface: Component = () => (
 
 const AppSettingsSurface: Component = () => {
   const settings = useSettings();
-  const { db, replaceState: replaceDb } = useLocalDb();
 
   const [editingPresetId, setEditingPresetId] = createSignal<string | undefined>();
   const [presetSubject, setPresetSubject] = createSignal("math");
@@ -1375,6 +1597,7 @@ const AppSettingsSurface: Component = () => {
   const [backupMessage, setBackupMessage] = createSignal<string | null>(null);
   const [backupError, setBackupError] = createSignal<string | null>(null);
   const [isExporting, setIsExporting] = createSignal(false);
+  const [isImporting, setIsImporting] = createSignal(false);
   let importInputRef: HTMLInputElement | undefined;
 
   const resetPresetDraft = () => {
@@ -1438,8 +1661,9 @@ const AppSettingsSurface: Component = () => {
     setIsExporting(true);
     setBackupError(null);
     try {
+      const snapshotDb = await fetchSnapshot();
       const snapshot = buildBackupSnapshot(
-        db,
+        snapshotDb,
         settings.state.settings,
         settings.state.presets,
       );
@@ -1462,9 +1686,10 @@ const AppSettingsSurface: Component = () => {
     const file = target.files?.[0];
     if (!file) return;
     setBackupError(null);
+    setIsImporting(true);
     try {
       const snapshot = await parseSnapshotFile(file);
-      replaceDb(snapshot.db);
+      await replaceSnapshot(snapshot.db as SnapshotPayload);
       settings.replaceState({
         settings: snapshot.settings,
         presets: snapshot.presets,
@@ -1479,6 +1704,7 @@ const AppSettingsSurface: Component = () => {
       );
     } finally {
       target.value = "";
+      setIsImporting(false);
     }
   };
 
@@ -1588,10 +1814,11 @@ const AppSettingsSurface: Component = () => {
                 {isExporting() ? "エクスポート中..." : "エクスポート"}
               </button>
               <button
-                class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
+                class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
                 onClick={triggerImport}
+                disabled={isImporting()}
               >
-                インポート
+                {isImporting() ? "インポート中..." : "インポート"}
               </button>
               <input
                 ref={importInputRef}

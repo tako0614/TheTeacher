@@ -2,13 +2,14 @@ import {
   type AppSettings,
   type BackupSnapshot,
   type Preset,
+  type LocalDbSnapshot,
   backupSnapshotSchema,
 } from "@theteacher/shared";
 
-import { type DbState } from "../local-db";
+import { type SnapshotPayload } from "./api-client";
 
 export const buildBackupSnapshot = (
-  db: DbState,
+  db: SnapshotPayload | LocalDbSnapshot,
   settings: AppSettings,
   presets: Preset[],
 ): BackupSnapshot => ({

@@ -1,10 +1,24 @@
+import type { D1Database } from "@cloudflare/workers-types";
 import {
   schemas,
+  type GeneratedContent,
+  type Learning,
+  type Material,
+  type PracticeSession,
   type SemanticNode,
   refTypeSchema,
 } from "@theteacher/shared";
 import { Hono } from "hono";
 import { z } from "zod";
+
+import {
+  parseJson,
+  toJson,
+  type GeneratedContentRow,
+  type LearningWithStatsRow,
+  type MaterialRow,
+  type PracticeSessionRow,
+} from "./db";
 
 const proxyRequestSchema = z.object({
   prompt: z.string().min(1, "prompt is required"),
@@ -23,10 +37,434 @@ const semanticSearchRequestSchema = z.object({
   subject: z.string().min(1).optional(),
 });
 
-export const app = new Hono();
+const learningListQuerySchema = z.object({
+  q: z.string().trim().min(1).optional(),
+  subject: z.string().trim().min(1).optional(),
+  tag: z.string().trim().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+});
+
+const upsertLearningSchema = schemas.learning
+  .pick({
+    id: true,
+    title: true,
+    subject: true,
+    tags: true,
+    progress: true,
+    createdAt: true,
+    updatedAt: true,
+  })
+  .partial({ id: true, progress: true, subject: true, tags: true, createdAt: true, updatedAt: true })
+  .extend({
+    title: z.string().min(1),
+  });
+
+const updateLearningSchema = upsertLearningSchema.partial().refine(
+  (data) => Object.keys(data).length > 0,
+  { message: "at least one field is required" },
+);
+
+const upsertMaterialSchema = schemas.material
+  .pick({
+    id: true,
+    learningId: true,
+    type: true,
+    sourcePath: true,
+    rawContent: true,
+    metadata: true,
+    createdAt: true,
+    updatedAt: true,
+  })
+  .partial({ id: true, sourcePath: true, rawContent: true, metadata: true, createdAt: true, updatedAt: true })
+  .extend({
+    learningId: z.string().uuid(),
+    type: schemas.material.shape.type,
+  });
+
+const upsertGeneratedSchema = schemas.generatedContent
+  .pick({
+    id: true,
+    learningId: true,
+    materialId: true,
+    type: true,
+    content: true,
+    promptPreset: true,
+    createdAt: true,
+  })
+  .partial({ id: true, materialId: true, promptPreset: true, createdAt: true })
+  .extend({
+    learningId: z.string().uuid(),
+    type: schemas.generatedContent.shape.type,
+    content: z.record(z.string(), z.unknown()),
+  });
+
+const upsertSessionSchema = schemas.practiceSession
+  .pick({
+    id: true,
+    learningId: true,
+    generatedContentId: true,
+    questionRef: true,
+    answerText: true,
+    isCorrect: true,
+    feedback: true,
+    score: true,
+    createdAt: true,
+  })
+  .partial({
+    id: true,
+    generatedContentId: true,
+    isCorrect: true,
+    feedback: true,
+    score: true,
+    questionRef: true,
+    createdAt: true,
+  })
+  .extend({
+    learningId: z.string().uuid(),
+    answerText: z.string().min(1),
+  });
+
+type AppBindings = {
+  DB: D1Database;
+};
+
+type AppEnv = {
+  Bindings: AppBindings;
+};
+
+export const app = new Hono<AppEnv>();
+
+const nowIso = () => new Date().toISOString();
+
+const mapLearning = (row: LearningWithStatsRow): Learning & {
+  materialsCount: number;
+  generatedCount: number;
+  sessionCount: number;
+  lastStudiedAt?: string;
+} => ({
+  id: row.id,
+  title: row.title,
+  subject: row.subject ?? undefined,
+  tags: parseJson<string[]>(row.tags),
+  progress: row.progress ?? undefined,
+  createdAt: row.createdAt,
+  updatedAt: row.updatedAt,
+  materialsCount: row.materialsCount ?? 0,
+  generatedCount: row.generatedCount ?? 0,
+  sessionCount: row.sessionCount ?? 0,
+  lastStudiedAt: row.lastStudiedAt ?? undefined,
+});
+
+const mapMaterial = (row: MaterialRow): Material => ({
+  id: row.id,
+  learningId: row.learningId,
+  type: row.type,
+  sourcePath: row.sourcePath ?? undefined,
+  rawContent: row.rawContent ?? undefined,
+  metadata: parseJson<Record<string, unknown>>(row.metadata),
+  createdAt: row.createdAt,
+  updatedAt: row.updatedAt,
+});
+
+const mapGeneratedContent = (row: GeneratedContentRow): GeneratedContent => ({
+  id: row.id,
+  learningId: row.learningId,
+  materialId: row.materialId ?? undefined,
+  type: row.type,
+  content: parseJson<Record<string, unknown>>(row.content) ?? {},
+  promptPreset: row.promptPreset ?? undefined,
+  createdAt: row.createdAt,
+});
+
+const mapPracticeSession = (row: PracticeSessionRow): PracticeSession => ({
+  id: row.id,
+  learningId: row.learningId,
+  generatedContentId: row.generatedContentId ?? undefined,
+  questionRef: parseJson<Record<string, unknown>>(row.questionRef),
+  answerText: row.answerText,
+  isCorrect: row.isCorrect === null ? undefined : Boolean(row.isCorrect),
+  feedback: parseJson<Record<string, unknown>>(row.feedback),
+  score: typeof row.score === "number" ? row.score : undefined,
+  createdAt: row.createdAt,
+});
+
+const fetchLearning = async (db: D1Database, id: string) => {
+  const result = await db
+    .prepare(
+      `SELECT l.*, 
+        (SELECT COUNT(*) FROM Material m WHERE m.learningId = l.id) AS materialsCount,
+        (SELECT COUNT(*) FROM GeneratedContent g WHERE g.learningId = l.id) AS generatedCount,
+        (SELECT COUNT(*) FROM PracticeSession s WHERE s.learningId = l.id) AS sessionCount,
+        (SELECT MAX(createdAt) FROM PracticeSession s2 WHERE s2.learningId = l.id) AS lastStudiedAt
+      FROM Learning l WHERE l.id = ? LIMIT 1`,
+    )
+    .bind(id)
+    .first<LearningWithStatsRow>();
+  return result ? mapLearning(result) : null;
+};
+
+const buildLearningListQuery = (
+  params: z.infer<typeof learningListQuerySchema>,
+): { sql: string; binds: unknown[] } => {
+  let sql = `SELECT l.*, 
+    (SELECT COUNT(*) FROM Material m WHERE m.learningId = l.id) AS materialsCount,
+    (SELECT COUNT(*) FROM GeneratedContent g WHERE g.learningId = l.id) AS generatedCount,
+    (SELECT COUNT(*) FROM PracticeSession s WHERE s.learningId = l.id) AS sessionCount,
+    (SELECT MAX(createdAt) FROM PracticeSession s2 WHERE s2.learningId = l.id) AS lastStudiedAt
+    FROM Learning l WHERE 1=1`;
+  const binds: unknown[] = [];
+
+  if (params.subject) {
+    sql += " AND l.subject = ?";
+    binds.push(params.subject);
+  }
+
+  if (params.tag) {
+    sql += " AND LOWER(COALESCE(l.tags, '')) LIKE ?";
+    binds.push(`%${params.tag.toLowerCase()}%`);
+  }
+
+  if (params.q) {
+    sql += " AND (LOWER(l.title) LIKE ? OR LOWER(COALESCE(l.tags, '')) LIKE ?)";
+    const like = `%${params.q.toLowerCase()}%`;
+    binds.push(like, like);
+  }
+
+  sql += " ORDER BY l.updatedAt DESC LIMIT ?";
+  binds.push(params.limit);
+
+  return { sql, binds };
+};
 
 app.get("/health", (c) => {
   return c.json({ status: "ok" });
+});
+
+app.get("/api/learnings", async (c) => {
+  const query = Object.fromEntries(new URL(c.req.url).searchParams);
+  const parsed = learningListQuerySchema.safeParse(query);
+  if (!parsed.success) {
+    return c.json({ error: "invalid_query", issues: parsed.error.format() }, 400);
+  }
+
+  const { sql, binds } = buildLearningListQuery(parsed.data);
+  const rows = await c.env.DB.prepare(sql).bind(...binds).all<LearningWithStatsRow>();
+  const items = rows.results?.map(mapLearning) ?? [];
+  return c.json({ items, count: items.length });
+});
+
+app.get("/api/learnings/:id", async (c) => {
+  const id = c.req.param("id");
+  const learning = await fetchLearning(c.env.DB, id);
+  if (!learning) return c.json({ error: "not_found" }, 404);
+  return c.json(learning);
+});
+
+app.post("/api/learnings", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  const parsed = upsertLearningSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: "invalid_request", issues: parsed.error.format() }, 400);
+  }
+
+  const data = parsed.data;
+  const id = data.id ?? crypto.randomUUID();
+  const createdAt = data.createdAt ?? nowIso();
+  const updatedAt = data.updatedAt ?? createdAt;
+
+  await c.env.DB.prepare(
+    `INSERT OR REPLACE INTO Learning (id, title, subject, tags, progress, createdAt, updatedAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      id,
+      data.title,
+      data.subject ?? null,
+      toJson(data.tags),
+      data.progress ?? null,
+      createdAt,
+      updatedAt,
+    )
+    .run();
+
+  const learning = await fetchLearning(c.env.DB, id);
+  return c.json(learning, 201);
+});
+
+app.put("/api/learnings/:id", async (c) => {
+  const id = c.req.param("id");
+  const body = await c.req.json().catch(() => null);
+  const parsed = updateLearningSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: "invalid_request", issues: parsed.error.format() }, 400);
+  }
+
+  const exists = await fetchLearning(c.env.DB, id);
+  if (!exists) return c.json({ error: "not_found" }, 404);
+
+  const data = parsed.data;
+  const updatedAt = data.updatedAt ?? nowIso();
+
+  await c.env.DB.prepare(
+    `UPDATE Learning SET
+      title = COALESCE(?, title),
+      subject = COALESCE(?, subject),
+      tags = COALESCE(?, tags),
+      progress = COALESCE(?, progress),
+      updatedAt = ?
+    WHERE id = ?`,
+  )
+    .bind(
+      data.title ?? null,
+      data.subject ?? null,
+      data.tags ? toJson(data.tags) : null,
+      data.progress ?? null,
+      updatedAt,
+      id,
+    )
+    .run();
+
+  const learning = await fetchLearning(c.env.DB, id);
+  return c.json(learning);
+});
+
+app.delete("/api/learnings/:id", async (c) => {
+  const id = c.req.param("id");
+  await c.env.DB.prepare("DELETE FROM Learning WHERE id = ?").bind(id).run();
+  return c.json({ ok: true });
+});
+
+app.get("/api/learnings/:id/materials", async (c) => {
+  const id = c.req.param("id");
+  const rows = await c.env.DB
+    .prepare("SELECT * FROM Material WHERE learningId = ? ORDER BY createdAt DESC")
+    .bind(id)
+    .all<MaterialRow>();
+  const items = rows.results?.map(mapMaterial) ?? [];
+  return c.json({ items });
+});
+
+app.post("/api/materials", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  const parsed = upsertMaterialSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: "invalid_request", issues: parsed.error.format() }, 400);
+  }
+
+  const data = parsed.data;
+  const id = data.id ?? crypto.randomUUID();
+  const createdAt = data.createdAt ?? nowIso();
+  const updatedAt = data.updatedAt ?? createdAt;
+
+  await c.env.DB.prepare(
+    `INSERT OR REPLACE INTO Material (id, learningId, type, sourcePath, rawContent, metadata, createdAt, updatedAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      id,
+      data.learningId,
+      data.type,
+      data.sourcePath ?? null,
+      data.rawContent ?? null,
+      toJson(data.metadata),
+      createdAt,
+      updatedAt,
+    )
+    .run();
+
+  const row = await c.env.DB
+    .prepare("SELECT * FROM Material WHERE id = ? LIMIT 1")
+    .bind(id)
+    .first<MaterialRow>();
+  return c.json(row ? mapMaterial(row) : null, 201);
+});
+
+app.get("/api/learnings/:id/contents", async (c) => {
+  const id = c.req.param("id");
+  const rows = await c.env.DB
+    .prepare("SELECT * FROM GeneratedContent WHERE learningId = ? ORDER BY createdAt DESC")
+    .bind(id)
+    .all<GeneratedContentRow>();
+  const items = rows.results?.map(mapGeneratedContent) ?? [];
+  return c.json({ items });
+});
+
+app.post("/api/contents", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  const parsed = upsertGeneratedSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: "invalid_request", issues: parsed.error.format() }, 400);
+  }
+
+  const data = parsed.data;
+  const id = data.id ?? crypto.randomUUID();
+  const createdAt = data.createdAt ?? nowIso();
+
+  await c.env.DB.prepare(
+    `INSERT OR REPLACE INTO GeneratedContent (id, learningId, materialId, type, content, promptPreset, createdAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      id,
+      data.learningId,
+      data.materialId ?? null,
+      data.type,
+      toJson(data.content),
+      data.promptPreset ?? null,
+      createdAt,
+    )
+    .run();
+
+  const row = await c.env.DB
+    .prepare("SELECT * FROM GeneratedContent WHERE id = ? LIMIT 1")
+    .bind(id)
+    .first<GeneratedContentRow>();
+  return c.json(row ? mapGeneratedContent(row) : null, 201);
+});
+
+app.get("/api/learnings/:id/sessions", async (c) => {
+  const id = c.req.param("id");
+  const rows = await c.env.DB
+    .prepare("SELECT * FROM PracticeSession WHERE learningId = ? ORDER BY createdAt DESC")
+    .bind(id)
+    .all<PracticeSessionRow>();
+  const items = rows.results?.map(mapPracticeSession) ?? [];
+  return c.json({ items });
+});
+
+app.post("/api/sessions", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  const parsed = upsertSessionSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: "invalid_request", issues: parsed.error.format() }, 400);
+  }
+
+  const data = parsed.data;
+  const id = data.id ?? crypto.randomUUID();
+  const createdAt = data.createdAt ?? nowIso();
+
+  await c.env.DB.prepare(
+    `INSERT OR REPLACE INTO PracticeSession (id, learningId, generatedContentId, questionRef, answerText, isCorrect, feedback, score, createdAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      id,
+      data.learningId,
+      data.generatedContentId ?? null,
+      toJson(data.questionRef),
+      data.answerText,
+      data.isCorrect === undefined ? null : data.isCorrect ? 1 : 0,
+      toJson(data.feedback),
+      data.score ?? null,
+      createdAt,
+    )
+    .run();
+
+  const row = await c.env.DB
+    .prepare("SELECT * FROM PracticeSession WHERE id = ? LIMIT 1")
+    .bind(id)
+    .first<PracticeSessionRow>();
+  return c.json(row ? mapPracticeSession(row) : null, 201);
 });
 
 type SemanticNodeWithMeta = SemanticNode & {

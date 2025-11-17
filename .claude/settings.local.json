@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(tree:*)",
+      "mcp__codex__codex",
+      "mcp__codex__codex-reply"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

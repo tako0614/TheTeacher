@@ -7,7 +7,6 @@ import {
   type ParentComponent,
 } from "solid-js";
 
-import { LocalDbProvider } from "./local-db";
 import { SettingsProvider } from "./lib/settings-store";
 import { surfaces } from "./surfaces";
 
@@ -77,16 +76,14 @@ const AppShell: ParentComponent = (props) => {
 
 const App: Component = () => (
   <SettingsProvider>
-    <LocalDbProvider>
-      <Router root={AppShell}>
-        <For each={surfaces}>
-          {(surface) => (
-            <Route path={surface.path} component={surface.component} />
-          )}
-        </For>
-        <Route path="*" component={surfaces[0].component} />
-      </Router>
-    </LocalDbProvider>
+    <Router root={AppShell}>
+      <For each={surfaces}>
+        {(surface) => (
+          <Route path={surface.path} component={surface.component} />
+        )}
+      </For>
+      <Route path="*" component={surfaces[0].component} />
+    </Router>
   </SettingsProvider>
 );
 

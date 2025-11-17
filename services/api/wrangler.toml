@@ -2,3 +2,8 @@ name = "theteacher-api"
 main = "src/index.ts"
 compatibility_date = "2024-11-17"
 compatibility_flags = ["nodejs_compat"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "theteacher-db"
+database_id = "theteacher-db"
