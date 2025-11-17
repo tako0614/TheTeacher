@@ -1,4 +1,34 @@
-import { For, Show, createMemo, createSignal, type Component } from "solid-js";
+import {
+  For,
+  Show,
+  createMemo,
+  createSignal,
+  onMount,
+  type Component,
+} from "solid-js";
+import {
+  type IngestJob,
+  type MaterialIngestRequest,
+  type MaterialLibraryConfig,
+  type Preset,
+} from "@theteacher/shared";
+
+import {
+  bootstrapJobFromRequest,
+  materialIngestPresets,
+  resolveLibraryConfig,
+  sampleLibraryEntries,
+} from "../lib/materials";
+
+import {
+  type SemanticMatch,
+  type ToolCallLog,
+  proxyChat,
+  semanticSearch,
+} from "../lib/ai";
+import { buildBackupSnapshot, downloadSnapshot, parseSnapshotFile } from "../lib/backup";
+import { useSettings } from "../lib/settings-store";
+import { useLocalDb } from "../local-db";
 
 type LearningCard = {
   id: string;
@@ -252,6 +282,94 @@ const generatedSamples = {
 
 const LearningDetailSurface: Component = () => {
   const [tab, setTab] = createSignal(detailTabs[0].id);
+  const [selectedPreset, setSelectedPreset] = createSignal(
+    materialIngestPresets[0].id,
+  );
+  const [libraryConfig, setLibraryConfig] =
+    createSignal<MaterialLibraryConfig>();
+  const [ingestQueue, setIngestQueue] = createSignal<IngestJob[]>([]);
+
+  const seedJob = (
+    request: MaterialIngestRequest,
+    config: MaterialLibraryConfig,
+    runningIndex = 1,
+  ) => {
+    const job = bootstrapJobFromRequest(request, config, "processing");
+    job.steps = job.steps.map((step, index) =>
+      index < runningIndex
+        ? { ...step, status: "succeeded" }
+        : index === runningIndex
+          ? { ...step, status: "running" }
+          : step,
+    );
+    return job;
+  };
+
+  const enqueuePreset = () => {
+    const config = libraryConfig();
+    const preset = materialIngestPresets.find(
+      (item) => item.id === selectedPreset(),
+    );
+    if (!config || !preset) return;
+
+    const request: MaterialIngestRequest = {
+      ...preset.request,
+      source:
+        preset.request.source.kind === "url"
+          ? {
+              ...preset.request.source,
+              url:
+                preset.request.source.url ||
+                "https://example.com/article-to-import",
+            }
+          : {
+              ...preset.request.source,
+              path:
+                preset.request.source.kind === "image"
+                  ? "スクリーンショット.png"
+                  : "選択したファイル",
+            },
+    };
+
+    const job = bootstrapJobFromRequest(request, config, "queued");
+    setIngestQueue([job, ...ingestQueue()]);
+  };
+
+  const sourceLabel = (job: IngestJob) =>
+    job.source.kind === "url" ? job.source.url : job.source.path;
+
+  const formatBytes = (value?: number) =>
+    value ? `${Math.round(value / 1000)} KB` : "サイズ不明";
+
+  onMount(async () => {
+    const config = await resolveLibraryConfig();
+    setLibraryConfig(config);
+
+    const pdfPreset = materialIngestPresets.find((preset) => preset.id === "pdf");
+    const audioPreset = materialIngestPresets.find(
+      (preset) => preset.id === "audio",
+    );
+
+    if (pdfPreset && audioPreset) {
+      const pdfJob = seedJob(
+        {
+          ...pdfPreset.request,
+          source: { kind: "pdf", path: "math/二次関数_講義.pdf" },
+        },
+        config,
+        2,
+      );
+      const audioJob = seedJob(
+        {
+          ...audioPreset.request,
+          source: { kind: "audio", path: "audio/podcast.wav" },
+        },
+        config,
+        1,
+      );
+      setIngestQueue([pdfJob, audioJob]);
+    }
+  });
 
   const renderEmpty = () => (
     <div class="rounded-lg border border-dashed border-slate-200 bg-stone-50 px-4 py-6 text-sm text-slate-700">
@@ -383,6 +501,180 @@ const LearningDetailSurface: Component = () => {
             タブ切り替えと生成履歴をまとめ、演習フローへ移動しやすい構成を用意しています。
           </div>
         </aside>
+      </div>
+
+      <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+          <div>
+            <p class="text-xs font-semibold uppercase tracking-wide text-indigo-600">
+              教材取り込み & ファイルライブラリ
+            </p>
+            <h2 class="text-lg font-bold text-slate-900">
+              PDF/画像/OCR/音声/URL/動画のパイプライン設計を接続
+            </h2>
+            <p class="text-sm text-slate-600">
+              オフライン優先のTesseract（OCR）と Whisper-rs（文字起こし）を前提に、Tauriコマンドにつなぐキューと保存先を用意しています。
+            </p>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <select
+              class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 focus:border-indigo-300 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+              value={selectedPreset()}
+              onChange={(event) => setSelectedPreset(event.currentTarget.value)}
+            >
+              <For each={materialIngestPresets}>
+                {(preset) => <option value={preset.id}>{preset.label}</option>}
+              </For>
+            </select>
+            <button
+              class="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500"
+              onClick={enqueuePreset}
+            >
+              キューに追加
+            </button>
+          </div>
+        </div>
+
+        <div class="mt-4 grid gap-4 md:grid-cols-2">
+          <div class="space-y-3 rounded-lg border border-slate-200 bg-slate-50/70 p-3">
+            <div class="flex items-center justify-between">
+              <p class="text-xs font-semibold uppercase text-slate-500">
+                取り込みキュー（スタブ）
+              </p>
+              <span class="rounded-full bg-white px-2 py-1 text-xs font-semibold text-slate-700">
+                {ingestQueue().length} 件
+              </span>
+            </div>
+            <Show
+              when={ingestQueue().length}
+              fallback={
+                <p class="text-sm text-slate-600">
+                  まだキューはありません。上のプルダウンから種別を選びキューに追加します。
+                </p>
+              }
+            >
+              <div class="space-y-2">
+                <For each={ingestQueue()}>
+                  {(job) => (
+                    <div class="rounded-lg border border-slate-200 bg-white p-3">
+                      <div class="flex items-start justify-between gap-2">
+                        <div>
+                          <p class="text-xs font-semibold uppercase text-slate-500">
+                            {job.source.kind}
+                          </p>
+                          <p class="text-sm font-semibold text-slate-900">
+                            {sourceLabel(job)}
+                          </p>
+                          <p class="text-xs text-slate-500">
+                            OCR: {job.preferredOcrEngine || "未指定"} / STT:{" "}
+                            {job.preferredTranscriptionEngine || "未指定"}
+                          </p>
+                        </div>
+                        <span
+                          class={`rounded-full px-2 py-1 text-xs font-semibold ${
+                            job.status === "completed"
+                              ? "bg-emerald-100 text-emerald-700"
+                              : job.status === "processing"
+                                ? "bg-indigo-100 text-indigo-700"
+                                : "bg-amber-100 text-amber-700"
+                          }`}
+                        >
+                          {job.status}
+                        </span>
+                      </div>
+                      <div class="mt-2 space-y-1">
+                        <For each={job.steps}>
+                          {(step) => (
+                            <div class="flex items-center justify-between rounded-md bg-slate-50 px-2 py-1 text-xs">
+                              <span class="font-semibold text-slate-700">
+                                {step.label}
+                              </span>
+                              <span
+                                class={`rounded-full px-2 py-0.5 ${
+                                  step.status === "succeeded"
+                                    ? "bg-emerald-100 text-emerald-700"
+                                    : step.status === "running"
+                                      ? "bg-indigo-100 text-indigo-700"
+                                      : step.status === "failed"
+                                        ? "bg-rose-100 text-rose-700"
+                                        : "bg-slate-100 text-slate-600"
+                                }`}
+                              >
+                                {step.status}
+                              </span>
+                            </div>
+                          )}
+                        </For>
+                      </div>
+                    </div>
+                  )}
+                </For>
+              </div>
+            </Show>
+            <p class="text-xs text-slate-500">
+              Tauri側では `materials::ingest` コマンドでステップを更新予定。`native_tesseract` / `whisper_rs` をデフォルトに、必要なら `cloudflare_workers_ai` に切替できるようにフィールドを持たせています。
+            </p>
+          </div>
+
+          <div class="space-y-3 rounded-lg border border-slate-200 bg-slate-50/50 p-3">
+            <div class="flex items-center justify-between">
+              <div>
+                <p class="text-xs font-semibold uppercase text-slate-500">
+                  保存先とインデックス
+                </p>
+                <p class="text-sm text-slate-700">
+                  AppData（BaseDirectory.AppData）配下に TheTeacher/materials を確保。
+                </p>
+              </div>
+              <span class="rounded-full bg-white px-2 py-1 text-xs font-semibold text-slate-700">
+                {libraryConfig()?.rootDir || "AppData/TheTeacher/materials"}
+              </span>
+            </div>
+            <div class="space-y-1 rounded-md bg-white p-3 text-xs text-slate-700 shadow-sm">
+              <div class="flex items-center justify-between">
+                <span>ルート</span>
+                <span class="font-semibold">
+                  {libraryConfig()?.rootDir || "AppData/TheTeacher/materials"}
+                </span>
+              </div>
+              <div class="flex items-center justify-between">
+                <span>一時保存</span>
+                <span class="font-semibold">
+                  {libraryConfig()?.tempDir || "AppData/TheTeacher/materials/tmp"}
+                </span>
+              </div>
+              <div class="flex items-center justify-between">
+                <span>インデックス</span>
+                <span class="font-semibold">
+                  {libraryConfig()?.indexFile ||
+                    "AppData/TheTeacher/materials/material-index.json"}
+                </span>
+              </div>
+            </div>
+            <div>
+              <p class="text-xs font-semibold uppercase text-slate-500">
+                ライブラリサンプル（JSONインデックス）
+              </p>
+              <div class="mt-2 space-y-2">
+                <For each={sampleLibraryEntries}>
+                  {(entry) => (
+                    <div class="flex items-center justify-between rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700">
+                      <div>
+                        <p class="font-semibold">{entry.displayName}</p>
+                        <p class="text-xs text-slate-500">
+                          {entry.storedPath} ・ {entry.type}
+                        </p>
+                      </div>
+                      <span class="text-xs text-slate-600">
+                        {formatBytes(entry.bytes)}
+                      </span>
+                    </div>
+                  )}
+                </For>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     </section>
   );
@@ -547,16 +839,71 @@ const PracticeSurface: Component = () => {
 };
 
 const ChatSurface: Component = () => {
-  const conversations = [
-    { role: "user", content: "数学Iの二次関数を復習テストにしてください。" },
-    { role: "assistant", content: "3問の小テストを用意しました。始めますか？" },
-    { role: "user", content: "頂点の求め方の要約も追加でほしい。" },
-  ];
-  const toolCalls = [
-    { tool: "search_learnings", detail: "subject=math, tag=二次関数" },
-    { tool: "generate_questions", detail: "count=3, difficulty=medium" },
-    { tool: "save_content", detail: "type=qa, learning=高校数学I" },
-  ];
+  type ChatMessage = { role: "user" | "assistant"; content: string };
+  const [messages, setMessages] = createSignal<ChatMessage[]>([
+    {
+      role: "assistant",
+      content: "復習したい教材やテーマを教えてください。意味検索も同時に走らせます。",
+    },
+  ]);
+  const [toolCalls, setToolCalls] = createSignal<ToolCallLog[]>([
+    {
+      tool: "session_boot",
+      detail: "チャットを初期化しました (semantic search enabled)",
+    },
+  ]);
+  const [semanticHits, setSemanticHits] = createSignal<SemanticMatch[]>([]);
+  const [preset, setPreset] = createSignal("math_default");
+  const [tone, setTone] = createSignal("丁寧");
+  const [draft, setDraft] = createSignal("");
+  const [isSending, setIsSending] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+
+  const appendMessage = (role: ChatMessage["role"], content: string) =>
+    setMessages((prev) => [...prev, { role, content }]);
+
+  const runSemanticSearch = async (query: string) => {
+    const results = await semanticSearch(query, 4);
+    setSemanticHits(results);
+    setToolCalls((prev) => [
+      ...prev,
+      {
+        tool: "semantic_search",
+        detail: `query="${query.slice(0, 24)}" topK=${results.length}`,
+        result: results[0] ? results[0].label : "結果なし",
+      },
+    ]);
+  };
+
+  const handleSend = async () => {
+    const prompt = draft().trim();
+    if (!prompt || isSending()) return;
+
+    setError(null);
+    appendMessage("user", prompt);
+    setIsSending(true);
+    try {
+      const reply = await proxyChat(prompt, {
+        preset: preset(),
+        topK: 4,
+        tone: tone(),
+      });
+      if (reply.toolCalls.length > 0) {
+        setToolCalls((prev) => [...prev, ...reply.toolCalls]);
+      }
+      if (reply.related.length > 0) {
+        setSemanticHits(reply.related);
+      }
+      appendMessage("assistant", reply.reply);
+    } catch (err) {
+      console.error(err);
+      setError("Tool Call連携に失敗しました。もう一度お試しください。");
+    } finally {
+      setDraft("");
+      setIsSending(false);
+      void runSemanticSearch(prompt);
+    }
+  };
 
   return (
     <section class="space-y-6">
@@ -566,18 +913,24 @@ const ChatSurface: Component = () => {
             汎用AIチャット
           </p>
           <h1 class="text-2xl font-bold text-slate-900">
-            チャットとTool Callログを並べた2カラム構成
+            Tool Callと意味検索を実際に叩くチャット
           </h1>
           <p class="text-sm text-slate-600">
-            教材がなくてもチャットから学習生成を依頼できます。左側にTool Callの履歴を残し、開発向けの観察をしやすくしました。
+            教材がなくてもチャットから学習生成を依頼できます。Tool Call とベクトル検索をバックエンドに送り、関連コンテンツ候補を表示します。
           </p>
         </div>
         <div class="flex flex-wrap gap-2">
-          <button class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">
+          <button
+            class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+            onClick={() => appendMessage("assistant", "最近の学習から新規カードを提案します。")}
+          >
             新しい学習を提案
           </button>
-          <button class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">
-            プリセット切替
+          <button
+            class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+            onClick={() => setToolCalls([])}
+          >
+            Tool Callをクリア
           </button>
         </div>
       </header>
@@ -588,17 +941,45 @@ const ChatSurface: Component = () => {
             Tool Call ログ
           </p>
           <div class="space-y-2 text-sm text-slate-800">
-            <For each={toolCalls}>
+            <For each={toolCalls()}>
               {(call) => (
                 <div class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
                   <p class="text-xs uppercase text-indigo-700">{call.tool}</p>
                   <p class="text-slate-700">{call.detail}</p>
+                  <Show when={call.result}>
+                    {(result) => (
+                      <p class="text-xs text-slate-500">→ {result()}</p>
+                    )}
+                  </Show>
                 </div>
               )}
             </For>
+            <Show when={toolCalls().length === 0}>
+              <p class="text-sm text-slate-500">Tool Callの履歴はまだありません。</p>
+            </Show>
           </div>
-          <div class="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-            学習を作成 / 追加できる Tool Call をここから確認できます。
+
+          <div class="space-y-2 rounded-lg border border-emerald-200 bg-emerald-50 p-3">
+            <p class="text-xs font-semibold uppercase text-emerald-700">
+              意味検索結果
+            </p>
+            <Show when={semanticHits().length > 0} fallback={<p class="text-sm text-emerald-800">クエリに関連するコンテンツをここに表示します。</p>}>
+              <ul class="space-y-2 text-sm text-emerald-900">
+                <For each={semanticHits()}>
+                  {(hit) => (
+                    <li class="rounded-md border border-emerald-200 bg-white/70 px-3 py-2">
+                      <div class="flex items-center justify-between gap-2">
+                        <span class="font-semibold">{hit.label}</span>
+                        <span class="text-xs text-emerald-700">
+                          score {hit.score.toFixed(2)}
+                        </span>
+                      </div>
+                      <p class="text-xs text-slate-600">{hit.excerpt}</p>
+                    </li>
+                  )}
+                </For>
+              </ul>
+            </Show>
           </div>
         </aside>
 
@@ -608,7 +989,7 @@ const ChatSurface: Component = () => {
               チャットログ
             </p>
             <div class="space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm">
-              <For each={conversations}>
+              <For each={messages()}>
                 {(msg) => (
                   <div
                     class={`rounded-md p-2 ${
@@ -632,32 +1013,62 @@ const ChatSurface: Component = () => {
               <label class="text-xs font-semibold text-slate-700">
                 教科プリセット
               </label>
-              <select class="rounded-lg border border-slate-200 px-2 py-1 text-sm text-slate-800">
-                <option>math_default</option>
-                <option>english_reading</option>
-                <option>programming_cpp</option>
+              <select
+                value={preset()}
+                onChange={(event) => setPreset(event.currentTarget.value)}
+                class="rounded-lg border border-slate-200 px-2 py-1 text-sm text-slate-800"
+              >
+                <option value="math_default">math_default</option>
+                <option value="english_reading">english_reading</option>
+                <option value="programming_cpp">programming_cpp</option>
               </select>
             </div>
             <div class="flex items-center gap-2">
               <label class="text-xs font-semibold text-slate-700">
                 トーン
               </label>
-              <select class="rounded-lg border border-slate-200 px-2 py-1 text-sm text-slate-800">
-                <option>丁寧</option>
-                <option>カジュアル</option>
-                <option>厳しめ</option>
+              <select
+                value={tone()}
+                onChange={(event) => setTone(event.currentTarget.value)}
+                class="rounded-lg border border-slate-200 px-2 py-1 text-sm text-slate-800"
+              >
+                <option value="丁寧">丁寧</option>
+                <option value="カジュアル">カジュアル</option>
+                <option value="厳しめ">厳しめ</option>
               </select>
             </div>
           </div>
 
-          <div class="flex gap-2">
-            <input
-              class="flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-indigo-300 focus:outline-none focus:ring-2 focus:ring-indigo-100"
-              placeholder="質問や生成依頼を入力..."
-            />
-            <button class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-500">
-              送信
-            </button>
+          <div class="space-y-2">
+            <div class="flex gap-2">
+              <input
+                value={draft()}
+                onInput={(event) => setDraft(event.currentTarget.value)}
+                class="flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-indigo-300 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+                placeholder="質問や生成依頼を入力..."
+              />
+              <button
+                class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-70"
+                onClick={handleSend}
+                disabled={isSending() || !draft().trim()}
+              >
+                {isSending() ? "送信中..." : "送信"}
+              </button>
+              <button
+                class="rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-70"
+                onClick={() => void runSemanticSearch(draft())}
+                disabled={isSending() || !draft().trim()}
+              >
+                意味検索のみ
+              </button>
+            </div>
+            <Show when={error()}>
+              {(err) => (
+                <p class="text-xs text-rose-600">
+                  {err()}
+                </p>
+              )}
+            </Show>
           </div>
         </div>
       </div>
@@ -952,145 +1363,403 @@ const NewLearningSurface: Component = () => (
   </section>
 );
 
-const presets = [
-  { subject: "math", title: "math_detail", tone: "論理的" },
-  { subject: "english", title: "english_reading", tone: "丁寧" },
-  { subject: "science", title: "science_brief", tone: "簡潔" },
-];
+const AppSettingsSurface: Component = () => {
+  const settings = useSettings();
+  const { db, replaceState: replaceDb } = useLocalDb();
 
-const AppSettingsSurface: Component = () => (
-  <section class="space-y-6">
-    <header class="space-y-2">
-      <p class="text-xs font-semibold uppercase tracking-wide text-indigo-600">
-        設定
-      </p>
-      <h1 class="text-2xl font-bold text-slate-900">
-        教科別プリセットとAI設定、バックアップを管理
-      </h1>
-      <p class="text-sm text-slate-600">
-        モデル設定とプリセットのテーブル、バックアップ/エクスポートの状態を1画面にまとめています。
-      </p>
-    </header>
+  const [editingPresetId, setEditingPresetId] = createSignal<string | undefined>();
+  const [presetSubject, setPresetSubject] = createSignal("math");
+  const [presetTitle, setPresetTitle] = createSignal("");
+  const [presetSystemPrompt, setPresetSystemPrompt] = createSignal("");
+  const [presetUserTemplate, setPresetUserTemplate] = createSignal("");
+  const [backupMessage, setBackupMessage] = createSignal<string | null>(null);
+  const [backupError, setBackupError] = createSignal<string | null>(null);
+  const [isExporting, setIsExporting] = createSignal(false);
+  let importInputRef: HTMLInputElement | undefined;
 
-    <div class="grid gap-4 md:grid-cols-[1.1fr_0.9fr]">
-      <div class="space-y-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-        <p class="text-xs font-semibold uppercase text-slate-500">
-          AI設定
+  const resetPresetDraft = () => {
+    const fallback = settings.state.presets[0];
+    setEditingPresetId(undefined);
+    setPresetSubject(fallback?.subject ?? "math");
+    setPresetTitle("");
+    setPresetSystemPrompt(
+      fallback?.systemPrompt ?? "学習のねらいと出力形式をここに書きます。",
+    );
+    setPresetUserTemplate(
+      fallback?.userInstructionTemplate ??
+        "教材テキスト: {{material}}\n出力: Q&Aと要約を作ってください。",
+    );
+  };
+
+  onMount(() => resetPresetDraft());
+
+  const savePreset = () => {
+    setBackupError(null);
+    const title = presetTitle().trim();
+    if (!title || !presetSystemPrompt().trim() || !presetUserTemplate().trim()) {
+      setBackupError("プリセット名とプロンプトは必須です。");
+      return;
+    }
+    const saved = settings.upsertPreset({
+      id: editingPresetId(),
+      subject: presetSubject().trim() || "general",
+      title,
+      systemPrompt: presetSystemPrompt().trim(),
+      userInstructionTemplate: presetUserTemplate().trim(),
+    });
+    setBackupMessage(`プリセットを保存しました: ${saved.title}`);
+    resetPresetDraft();
+  };
+
+  const editPreset = (preset: Preset) => {
+    setEditingPresetId(preset.id);
+    setPresetSubject(preset.subject);
+    setPresetTitle(preset.title);
+    setPresetSystemPrompt(preset.systemPrompt);
+    setPresetUserTemplate(preset.userInstructionTemplate);
+  };
+
+  const duplicatePreset = (id: string) => {
+    const duplicated = settings.duplicatePreset(id);
+    if (duplicated) {
+      setBackupMessage(`プリセットを複製しました: ${duplicated.title}`);
+    }
+  };
+
+  const deletePreset = (id: string) => {
+    settings.deletePreset(id);
+    setBackupMessage("プリセットを削除しました");
+    if (editingPresetId() === id) {
+      resetPresetDraft();
+    }
+  };
+
+  const handleExport = async () => {
+    setIsExporting(true);
+    setBackupError(null);
+    try {
+      const snapshot = buildBackupSnapshot(
+        db,
+        settings.state.settings,
+        settings.state.presets,
+      );
+      await downloadSnapshot(snapshot);
+      settings.markBackupTaken(snapshot.takenAt);
+      setBackupMessage("バックアップを書き出しました");
+    } catch (error) {
+      setBackupError(
+        error instanceof Error
+          ? error.message
+          : "バックアップのエクスポートに失敗しました",
+      );
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  const handleImportSelection = async (event: Event) => {
+    const target = event.currentTarget as HTMLInputElement;
+    const file = target.files?.[0];
+    if (!file) return;
+    setBackupError(null);
+    try {
+      const snapshot = await parseSnapshotFile(file);
+      replaceDb(snapshot.db);
+      settings.replaceState({
+        settings: snapshot.settings,
+        presets: snapshot.presets,
+      });
+      settings.markBackupTaken(snapshot.takenAt);
+      setBackupMessage(`バックアップを適用しました: ${file.name}`);
+    } catch (error) {
+      setBackupError(
+        error instanceof Error
+          ? error.message
+          : "バックアップの読み込みに失敗しました",
+      );
+    } finally {
+      target.value = "";
+    }
+  };
+
+  const triggerImport = () => importInputRef?.click();
+
+  return (
+    <section class="space-y-6">
+      <header class="space-y-2">
+        <p class="text-xs font-semibold uppercase tracking-wide text-indigo-600">
+          設定
         </p>
-        <div class="mt-2 grid gap-3 md:grid-cols-2">
-          <label class="flex flex-col gap-1 text-sm">
-            <span class="text-xs font-semibold text-slate-600">モデル</span>
-            <select class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800">
-              <option>gpt-4o-mini</option>
-              <option>gpt-4.1-preview</option>
-              <option>claude-3.5-sonnet</option>
-            </select>
-          </label>
-          <label class="flex flex-col gap-1 text-sm">
-            <span class="text-xs font-semibold text-slate-600">
-              温度 (創造性)
-            </span>
-            <input
-              type="range"
-              min="0"
-              max="1"
-              step="0.1"
-              value="0.3"
-              class="w-full"
-              aria-label="temperature slider"
-            />
-          </label>
-          <label class="flex flex-col gap-1 text-sm md:col-span-2">
-            <span class="text-xs font-semibold text-slate-600">APIキー</span>
-            <input
-              class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
-              placeholder="sk-..."
-            />
-          </label>
-        </div>
-      </div>
-
-      <div class="space-y-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-        <p class="text-xs font-semibold uppercase text-slate-500">
-          バックアップ
+        <h1 class="text-2xl font-bold text-slate-900">
+          教科別プリセットとAI設定、バックアップを管理
+        </h1>
+        <p class="text-sm text-slate-600">
+          モデル設定とプリセットのテーブル、バックアップ/エクスポートの状態を1画面にまとめています。
         </p>
-        <div class="space-y-2 text-sm text-slate-800">
-          <div class="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2">
-            <span>最終バックアップ</span>
-            <span class="font-semibold">2024-11-02 09:10</span>
-          </div>
-          <div class="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2">
-            <span>保存先</span>
-            <span>ローカル + 外部ストレージ</span>
-          </div>
-          <div class="flex gap-2">
-            <button class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">
-              エクスポート
-            </button>
-            <button class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">
-              インポート
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
+      </header>
 
-    <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-      <div class="flex items-center justify-between">
-        <div>
+      <div class="grid gap-4 md:grid-cols-[1.1fr_0.9fr]">
+        <div class="space-y-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
           <p class="text-xs font-semibold uppercase text-slate-500">
-            教科プリセット
+            AI設定
           </p>
-          <p class="text-sm text-slate-600">
-            一覧・複製・削除をここで管理します。教科タグでフィルタできます。
-          </p>
+          <div class="mt-2 grid gap-3 md:grid-cols-2">
+            <label class="flex flex-col gap-1 text-sm">
+              <span class="text-xs font-semibold text-slate-600">モデル</span>
+              <select
+                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+                value={settings.state.settings.ai.model}
+                onInput={(event) =>
+                  settings.updateAiSettings({
+                    model: event.currentTarget.value,
+                  })
+                }
+              >
+                <option value="gpt-4o-mini">gpt-4o-mini</option>
+                <option value="gpt-4.1-preview">gpt-4.1-preview</option>
+                <option value="claude-3.5-sonnet">claude-3.5-sonnet</option>
+              </select>
+            </label>
+            <label class="flex flex-col gap-1 text-sm">
+              <span class="text-xs font-semibold text-slate-600">
+                温度 (創造性)
+              </span>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.1"
+                value={settings.state.settings.ai.temperature}
+                class="w-full"
+                aria-label="temperature slider"
+                onInput={(event) =>
+                  settings.updateAiSettings({
+                    temperature: Number(event.currentTarget.value),
+                  })
+                }
+              />
+            </label>
+            <label class="flex flex-col gap-1 text-sm md:col-span-2">
+              <span class="text-xs font-semibold text-slate-600">APIキー</span>
+              <input
+                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+                placeholder="sk-..."
+                value={settings.state.settings.ai.apiKey ?? ""}
+                onInput={(event) =>
+                  settings.updateAiSettings({
+                    apiKey: event.currentTarget.value,
+                  })
+                }
+              />
+            </label>
+          </div>
         </div>
-        <button class="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-100">
-          + プリセットを追加
-        </button>
+
+        <div class="space-y-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+          <p class="text-xs font-semibold uppercase text-slate-500">
+            バックアップ
+          </p>
+          <div class="space-y-2 text-sm text-slate-800">
+            <div class="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2">
+              <span>最終バックアップ</span>
+              <span class="font-semibold">
+                {settings.state.settings.backup.lastBackupAt ?? "未実行"}
+              </span>
+            </div>
+            <label class="flex flex-col gap-1">
+              <span class="text-xs font-semibold text-slate-600">保存先</span>
+              <input
+                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+                placeholder="例: Downloads/TheTeacher/backups"
+                value={settings.state.settings.backup.targetDirectory ?? ""}
+                onInput={(event) =>
+                  settings.updateBackupSettings({
+                    targetDirectory: event.currentTarget.value,
+                  })
+                }
+              />
+            </label>
+            <div class="flex gap-2">
+              <button
+                class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                onClick={handleExport}
+                disabled={isExporting()}
+              >
+                {isExporting() ? "エクスポート中..." : "エクスポート"}
+              </button>
+              <button
+                class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
+                onClick={triggerImport}
+              >
+                インポート
+              </button>
+              <input
+                ref={importInputRef}
+                type="file"
+                accept="application/json"
+                class="hidden"
+                onChange={handleImportSelection}
+              />
+            </div>
+            <Show when={backupMessage()}>
+              {(message) => (
+                <p class="text-xs text-emerald-700">{message}</p>
+              )}
+            </Show>
+            <Show when={backupError()}>
+              {(message) => (
+                <p class="text-xs text-rose-700">{message}</p>
+              )}
+            </Show>
+          </div>
+        </div>
       </div>
 
-      <div class="mt-3 overflow-hidden rounded-lg border border-slate-200">
-        <table class="min-w-full divide-y divide-slate-200 text-sm">
-          <thead class="bg-slate-50 text-left text-xs uppercase text-slate-500">
-            <tr>
-              <th class="px-3 py-2">教科</th>
-              <th class="px-3 py-2">プリセット名</th>
-              <th class="px-3 py-2">トーン</th>
-              <th class="px-3 py-2 text-right">操作</th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-slate-200 bg-white text-slate-800">
-            <For each={presets}>
-              {(preset) => (
-                <tr>
-                  <td class="px-3 py-2 font-semibold uppercase text-slate-700">
-                    {preset.subject}
-                  </td>
-                  <td class="px-3 py-2">{preset.title}</td>
-                  <td class="px-3 py-2">{preset.tone}</td>
-                  <td class="px-3 py-2">
-                    <div class="flex justify-end gap-2">
-                      <button class="rounded-md border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50">
-                        編集
-                      </button>
-                      <button class="rounded-md border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50">
-                        複製
-                      </button>
-                      <button class="rounded-md border border-rose-200 px-2 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-50">
-                        削除
-                      </button>
-                    </div>
-                  </td>
-                </tr>
+      <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div class="flex items-center justify-between">
+          <div>
+            <p class="text-xs font-semibold uppercase text-slate-500">
+              教科プリセット
+            </p>
+            <p class="text-sm text-slate-600">
+              一覧・複製・削除をここで管理します。教科タグでフィルタできます。
+            </p>
+          </div>
+          <button
+            class="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-100"
+            onClick={savePreset}
+          >
+            + プリセットを追加
+          </button>
+        </div>
+
+        <div class="mt-3 grid gap-3 rounded-lg bg-slate-50 p-3 text-sm">
+          <div class="grid gap-2 md:grid-cols-2">
+            <label class="flex flex-col gap-1">
+              <span class="text-xs font-semibold text-slate-600">教科</span>
+              <select
+                class="rounded-md border border-slate-200 px-2 py-1"
+                value={presetSubject()}
+                onInput={(event) => setPresetSubject(event.currentTarget.value)}
+              >
+                <option value="math">math</option>
+                <option value="english">english</option>
+                <option value="science">science</option>
+                <option value="programming">programming</option>
+              </select>
+            </label>
+            <label class="flex flex-col gap-1">
+              <span class="text-xs font-semibold text-slate-600">
+                プリセット名
+              </span>
+              <input
+                class="rounded-md border border-slate-200 px-2 py-1"
+                value={presetTitle()}
+                onInput={(event) => setPresetTitle(event.currentTarget.value)}
+                placeholder="math_detail など"
+              />
+            </label>
+          </div>
+          <label class="flex flex-col gap-1">
+            <span class="text-xs font-semibold text-slate-600">
+              システムプロンプト
+            </span>
+            <textarea
+              class="min-h-[80px] rounded-md border border-slate-200 px-2 py-1"
+              value={presetSystemPrompt()}
+              onInput={(event) => setPresetSystemPrompt(event.currentTarget.value)}
+            />
+          </label>
+          <label class="flex flex-col gap-1">
+            <span class="text-xs font-semibold text-slate-600">
+              ユーザーテンプレート
+            </span>
+            <textarea
+              class="min-h-[80px] rounded-md border border-slate-200 px-2 py-1"
+              value={presetUserTemplate()}
+              onInput={(event) => setPresetUserTemplate(event.currentTarget.value)}
+            />
+          </label>
+          <div class="flex gap-2">
+            <button
+              class="rounded-md bg-indigo-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500"
+              onClick={savePreset}
+            >
+              {editingPresetId() ? "プリセットを更新" : "プリセットを追加"}
+            </button>
+            <button
+              class="rounded-md border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+              onClick={resetPresetDraft}
+            >
+              編集をクリア
+            </button>
+            <Show when={editingPresetId()}>
+              {(id) => (
+                <button
+                  class="rounded-md border border-rose-200 px-3 py-2 text-xs font-semibold text-rose-700 hover:bg-rose-50"
+                  onClick={() => deletePreset(id)}
+                >
+                  削除
+                </button>
               )}
-            </For>
-          </tbody>
-        </table>
+            </Show>
+          </div>
+        </div>
+
+        <div class="mt-3 overflow-hidden rounded-lg border border-slate-200">
+          <table class="min-w-full divide-y divide-slate-200 text-sm">
+            <thead class="bg-slate-50 text-left text-xs uppercase text-slate-500">
+              <tr>
+                <th class="px-3 py-2">教科</th>
+                <th class="px-3 py-2">プリセット名</th>
+                <th class="px-3 py-2">プロンプト要約</th>
+                <th class="px-3 py-2 text-right">操作</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-200 bg-white text-slate-800">
+              <For each={settings.state.presets}>
+                {(preset) => (
+                  <tr>
+                    <td class="px-3 py-2 font-semibold uppercase text-slate-700">
+                      {preset.subject}
+                    </td>
+                    <td class="px-3 py-2">{preset.title}</td>
+                    <td class="px-3 py-2">
+                      {preset.systemPrompt.slice(0, 32)}
+                      {preset.systemPrompt.length > 32 ? "..." : ""}
+                    </td>
+                    <td class="px-3 py-2">
+                      <div class="flex justify-end gap-2">
+                        <button
+                          class="rounded-md border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                          onClick={() => editPreset(preset)}
+                        >
+                          編集
+                        </button>
+                        <button
+                          class="rounded-md border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                          onClick={() => duplicatePreset(preset.id)}
+                        >
+                          複製
+                        </button>
+                        <button
+                          class="rounded-md border border-rose-200 px-2 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-50"
+                          onClick={() => deletePreset(preset.id)}
+                        >
+                          削除
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+              </For>
+            </tbody>
+          </table>
+        </div>
       </div>
-    </div>
-  </section>
-);
+    </section>
+  );
+};
 
 export type Surface = {
   path: string;
