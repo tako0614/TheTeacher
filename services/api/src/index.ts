@@ -5,6 +5,7 @@ import {
   type Learning,
   type Material,
   type PracticeSession,
+  type Preset,
   type SemanticNode,
   refTypeSchema,
 } from "@theteacher/shared";
@@ -18,6 +19,7 @@ import {
   type LearningWithStatsRow,
   type MaterialRow,
   type PracticeSessionRow,
+  type PresetRow,
 } from "./db";
 
 const proxyRequestSchema = z.object({
@@ -41,6 +43,11 @@ const learningListQuerySchema = z.object({
   q: z.string().trim().min(1).optional(),
   subject: z.string().trim().min(1).optional(),
   tag: z.string().trim().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+});
+
+const presetListQuerySchema = z.object({
+  subject: z.string().trim().min(1).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
 });
 
@@ -124,6 +131,31 @@ const upsertSessionSchema = schemas.practiceSession
     answerText: z.string().min(1),
   });
 
+const upsertPresetSchema = schemas.preset
+  .pick({
+    id: true,
+    subject: true,
+    title: true,
+    systemPrompt: true,
+    userInstructionTemplate: true,
+    createdAt: true,
+    updatedAt: true,
+  })
+  .partial({ id: true, createdAt: true, updatedAt: true })
+  .extend({
+    subject: z.string().min(1),
+    title: z.string().min(1),
+    systemPrompt: z.string().min(1),
+    userInstructionTemplate: z.string().min(1),
+  });
+
+const updatePresetSchema = upsertPresetSchema
+  .omit({ id: true })
+  .partial()
+  .refine((data) => Object.keys(data).length > 0, {
+    message: "at least one field is required",
+  });
+
 type AppBindings = {
   DB: D1Database;
 };
@@ -188,6 +220,16 @@ const mapPracticeSession = (row: PracticeSessionRow): PracticeSession => ({
   createdAt: row.createdAt,
 });
 
+const mapPreset = (row: PresetRow): Preset => ({
+  id: row.id,
+  subject: row.subject,
+  title: row.title,
+  systemPrompt: row.systemPrompt,
+  userInstructionTemplate: row.userInstructionTemplate,
+  createdAt: row.createdAt,
+  updatedAt: row.updatedAt,
+});
+
 const fetchLearning = async (db: D1Database, id: string) => {
   const result = await db
     .prepare(
@@ -201,6 +243,14 @@ const fetchLearning = async (db: D1Database, id: string) => {
     .bind(id)
     .first<LearningWithStatsRow>();
   return result ? mapLearning(result) : null;
+};
+
+const fetchPreset = async (db: D1Database, id: string) => {
+  const row = await db
+    .prepare("SELECT * FROM Preset WHERE id = ? LIMIT 1")
+    .bind(id)
+    .first<PresetRow>();
+  return row ? mapPreset(row) : null;
 };
 
 const buildLearningListQuery = (
@@ -465,6 +515,107 @@ app.post("/api/sessions", async (c) => {
     .bind(id)
     .first<PracticeSessionRow>();
   return c.json(row ? mapPracticeSession(row) : null, 201);
+});
+
+app.get("/api/presets", async (c) => {
+  const query = Object.fromEntries(new URL(c.req.url).searchParams);
+  const parsed = presetListQuerySchema.safeParse(query);
+  if (!parsed.success) {
+    return c.json({ error: "invalid_query", issues: parsed.error.format() }, 400);
+  }
+
+  const binds: unknown[] = [];
+  let sql = "SELECT * FROM Preset";
+  if (parsed.data.subject) {
+    sql += " WHERE subject = ?";
+    binds.push(parsed.data.subject);
+  }
+  sql += " ORDER BY updatedAt DESC LIMIT ?";
+  binds.push(parsed.data.limit);
+
+  const rows = await c.env.DB.prepare(sql).bind(...binds).all<PresetRow>();
+  const items = rows.results?.map(mapPreset) ?? [];
+  return c.json({ items, count: items.length });
+});
+
+app.get("/api/presets/:id", async (c) => {
+  const preset = await fetchPreset(c.env.DB, c.req.param("id"));
+  if (!preset) return c.json({ error: "not_found" }, 404);
+  return c.json(preset);
+});
+
+app.post("/api/presets", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  const parsed = upsertPresetSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: "invalid_request", issues: parsed.error.format() }, 400);
+  }
+
+  const data = parsed.data;
+  const id = data.id ?? crypto.randomUUID();
+  const createdAt = data.createdAt ?? nowIso();
+  const updatedAt = data.updatedAt ?? createdAt;
+
+  await c.env.DB.prepare(
+    `INSERT OR REPLACE INTO Preset (id, subject, title, systemPrompt, userInstructionTemplate, createdAt, updatedAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      id,
+      data.subject,
+      data.title,
+      data.systemPrompt,
+      data.userInstructionTemplate,
+      createdAt,
+      updatedAt,
+    )
+    .run();
+
+  const preset = await fetchPreset(c.env.DB, id);
+  return c.json(preset, 201);
+});
+
+app.put("/api/presets/:id", async (c) => {
+  const id = c.req.param("id");
+  const body = await c.req.json().catch(() => null);
+  const parsed = updatePresetSchema.safeParse(body);
+
+  if (!parsed.success) {
+    return c.json({ error: "invalid_request", issues: parsed.error.format() }, 400);
+  }
+
+  const exists = await fetchPreset(c.env.DB, id);
+  if (!exists) return c.json({ error: "not_found" }, 404);
+
+  const data = parsed.data;
+  const updatedAt = data.updatedAt ?? nowIso();
+  await c.env.DB.prepare(
+    `UPDATE Preset SET
+      subject = COALESCE(?, subject),
+      title = COALESCE(?, title),
+      systemPrompt = COALESCE(?, systemPrompt),
+      userInstructionTemplate = COALESCE(?, userInstructionTemplate),
+      updatedAt = ?
+    WHERE id = ?`,
+  )
+    .bind(
+      data.subject ?? null,
+      data.title ?? null,
+      data.systemPrompt ?? null,
+      data.userInstructionTemplate ?? null,
+      updatedAt,
+      id,
+    )
+    .run();
+
+  const preset = await fetchPreset(c.env.DB, id);
+  return c.json(preset);
+});
+
+app.delete("/api/presets/:id", async (c) => {
+  const id = c.req.param("id");
+  await c.env.DB.prepare("DELETE FROM Preset WHERE id = ?").bind(id).run();
+  return c.json({ ok: true });
 });
 
 type SemanticNodeWithMeta = SemanticNode & {

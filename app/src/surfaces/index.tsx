@@ -41,8 +41,12 @@ import {
   fetchLearnings,
   fetchLearning,
   fetchMaterials,
+  fetchPresets,
   fetchSessions,
   fetchSnapshot,
+  createPreset,
+  updatePreset,
+  deletePreset as deletePresetApi,
   replaceSnapshot,
   type SnapshotPayload,
 } from "../lib/api-client";
@@ -1598,6 +1602,7 @@ const AppSettingsSurface: Component = () => {
   const [backupError, setBackupError] = createSignal<string | null>(null);
   const [isExporting, setIsExporting] = createSignal(false);
   const [isImporting, setIsImporting] = createSignal(false);
+  const [isSyncingPresets, setIsSyncingPresets] = createSignal(false);
   let importInputRef: HTMLInputElement | undefined;
 
   const resetPresetDraft = () => {
@@ -1614,15 +1619,39 @@ const AppSettingsSurface: Component = () => {
     );
   };
 
-  onMount(() => resetPresetDraft());
+  const syncPresetsFromApi = async () => {
+    setBackupError(null);
+    setIsSyncingPresets(true);
+    try {
+      const presets = await fetchPresets({ limit: 50 });
+      if (presets.length) {
+        settings.replacePresets(presets);
+        setBackupMessage(`バックエンドのプリセット ${presets.length} 件を読み込みました。`);
+      }
+    } catch (error) {
+      setBackupError(
+        error instanceof Error
+          ? error.message
+          : "プリセットの取得に失敗しました。",
+      );
+    } finally {
+      setIsSyncingPresets(false);
+    }
+  };
 
-  const savePreset = () => {
+  onMount(() => {
+    resetPresetDraft();
+    void syncPresetsFromApi();
+  });
+
+  const savePreset = async () => {
     setBackupError(null);
     const title = presetTitle().trim();
     if (!title || !presetSystemPrompt().trim() || !presetUserTemplate().trim()) {
       setBackupError("プリセット名とプロンプトは必須です。");
       return;
     }
+    setIsSyncingPresets(true);
     const saved = settings.upsertPreset({
       id: editingPresetId(),
       subject: presetSubject().trim() || "general",
@@ -1630,8 +1659,30 @@ const AppSettingsSurface: Component = () => {
       systemPrompt: presetSystemPrompt().trim(),
       userInstructionTemplate: presetUserTemplate().trim(),
     });
-    setBackupMessage(`プリセットを保存しました: ${saved.title}`);
-    resetPresetDraft();
+    try {
+      if (editingPresetId()) {
+        await updatePreset(saved.id, {
+          subject: saved.subject,
+          title: saved.title,
+          systemPrompt: saved.systemPrompt,
+          userInstructionTemplate: saved.userInstructionTemplate,
+          createdAt: saved.createdAt,
+          updatedAt: saved.updatedAt,
+        });
+      } else {
+        await createPreset(saved);
+      }
+      setBackupMessage(`プリセットを保存しました: ${saved.title}`);
+      resetPresetDraft();
+    } catch (error) {
+      setBackupError(
+        error instanceof Error
+          ? error.message
+          : "プリセットの保存に失敗しました。",
+      );
+    } finally {
+      setIsSyncingPresets(false);
+    }
   };
 
   const editPreset = (preset: Preset) => {
@@ -1642,18 +1693,41 @@ const AppSettingsSurface: Component = () => {
     setPresetUserTemplate(preset.userInstructionTemplate);
   };
 
-  const duplicatePreset = (id: string) => {
+  const duplicatePreset = async (id: string) => {
     const duplicated = settings.duplicatePreset(id);
-    if (duplicated) {
+    if (!duplicated) return;
+    setIsSyncingPresets(true);
+    try {
+      await createPreset(duplicated);
       setBackupMessage(`プリセットを複製しました: ${duplicated.title}`);
+    } catch (error) {
+      setBackupError(
+        error instanceof Error
+          ? error.message
+          : "プリセットの複製に失敗しました。",
+      );
+    } finally {
+      setIsSyncingPresets(false);
     }
   };
 
-  const deletePreset = (id: string) => {
-    settings.deletePreset(id);
-    setBackupMessage("プリセットを削除しました");
-    if (editingPresetId() === id) {
-      resetPresetDraft();
+  const deletePreset = async (id: string) => {
+    setIsSyncingPresets(true);
+    try {
+      await deletePresetApi(id);
+      settings.deletePreset(id);
+      setBackupMessage("プリセットを削除しました");
+      if (editingPresetId() === id) {
+        resetPresetDraft();
+      }
+    } catch (error) {
+      setBackupError(
+        error instanceof Error
+          ? error.message
+          : "プリセットの削除に失敗しました。",
+      );
+    } finally {
+      setIsSyncingPresets(false);
     }
   };
 
@@ -1852,12 +1926,22 @@ const AppSettingsSurface: Component = () => {
               一覧・複製・削除をここで管理します。教科タグでフィルタできます。
             </p>
           </div>
-          <button
-            class="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-100"
-            onClick={savePreset}
-          >
-            + プリセットを追加
-          </button>
+          <div class="flex items-center gap-2">
+            <button
+              class="rounded-md border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+              onClick={() => void syncPresetsFromApi()}
+              disabled={isSyncingPresets()}
+            >
+              {isSyncingPresets() ? "同期中..." : "バックエンドと同期"}
+            </button>
+            <button
+              class="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-100 disabled:opacity-60"
+              onClick={savePreset}
+              disabled={isSyncingPresets()}
+            >
+              + プリセットを追加
+            </button>
+          </div>
         </div>
 
         <div class="mt-3 grid gap-3 rounded-lg bg-slate-50 p-3 text-sm">
@@ -1960,18 +2044,21 @@ const AppSettingsSurface: Component = () => {
                         <button
                           class="rounded-md border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50"
                           onClick={() => editPreset(preset)}
+                          disabled={isSyncingPresets()}
                         >
                           編集
                         </button>
                         <button
                           class="rounded-md border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50"
                           onClick={() => duplicatePreset(preset.id)}
+                          disabled={isSyncingPresets()}
                         >
                           複製
                         </button>
                         <button
                           class="rounded-md border border-rose-200 px-2 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-50"
                           onClick={() => deletePreset(preset.id)}
+                          disabled={isSyncingPresets()}
                         >
                           削除
                         </button>

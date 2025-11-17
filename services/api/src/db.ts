@@ -45,6 +45,16 @@ export type PracticeSessionRow = {
   createdAt: string;
 };
 
+export type PresetRow = {
+  id: string;
+  subject: string;
+  title: string;
+  systemPrompt: string;
+  userInstructionTemplate: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type LearningWithStatsRow = LearningRow & {
   materialsCount: number;
   generatedCount: number;

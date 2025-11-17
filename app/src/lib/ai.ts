@@ -1,3 +1,5 @@
+import { requestJson } from "./http";
+
 export type ToolCallLog = {
   tool: string;
   detail: string;
@@ -18,11 +20,6 @@ export type ChatReply = {
   toolCalls: ToolCallLog[];
   related: SemanticMatch[];
 };
-
-const apiBase =
-  typeof import.meta !== "undefined" && import.meta.env?.VITE_API_BASE
-    ? import.meta.env.VITE_API_BASE
-    : "http://localhost:8787";
 
 const fallbackMatches: SemanticMatch[] = [
   {
@@ -51,20 +48,6 @@ const fallbackMatches: SemanticMatch[] = [
   },
 ];
 
-const postJson = async <T>(path: string, payload: unknown): Promise<T> => {
-  const res = await fetch(`${apiBase}${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-
-  if (!res.ok) {
-    throw new Error(`Request failed: ${res.status}`);
-  }
-
-  return (await res.json()) as T;
-};
-
 const normalizeMatches = (matches: SemanticMatch[] | undefined) =>
   matches?.map((match) => ({
     id: match.id,
@@ -82,10 +65,11 @@ export const semanticSearch = async (
   if (!query.trim()) return [];
 
   try {
-    const data = await postJson<{ results: SemanticMatch[] }>(
-      "/search/semantic",
-      { query, topK },
-    );
+    const data = await requestJson<{ results: SemanticMatch[] }>({
+      path: "/search/semantic",
+      method: "POST",
+      body: { query, topK },
+    });
     return normalizeMatches(data.results);
   } catch (error) {
     console.warn("semantic search fell back to local mock", error);
@@ -106,15 +90,19 @@ export const proxyChat = async (
   }
 
   try {
-    const data = await postJson<{
+    const data = await requestJson<{
       message: string;
       toolCalls?: ToolCallLog[];
       related?: SemanticMatch[];
-    }>("/ai/proxy", {
-      prompt,
-      model: opts?.preset,
-      topK: opts?.topK ?? 3,
-      tone: opts?.tone,
+    }>({
+      path: "/ai/proxy",
+      method: "POST",
+      body: {
+        prompt,
+        model: opts?.preset,
+        topK: opts?.topK ?? 3,
+        tone: opts?.tone,
+      },
     });
 
     return {

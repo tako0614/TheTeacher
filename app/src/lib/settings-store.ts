@@ -177,6 +177,11 @@ export const createSettingsStore = () => {
       draft.presets = draft.presets.filter((preset) => preset.id !== id);
     });
 
+  const replacePresets = (presets: Preset[]) =>
+    mutate((draft) => {
+      draft.presets = presets;
+    });
+
   const markBackupTaken = (takenAt: string = nowIso()) =>
     updateBackupSettings({ lastBackupAt: takenAt });
 
@@ -197,6 +202,7 @@ export const createSettingsStore = () => {
     upsertPreset,
     duplicatePreset,
     deletePreset,
+    replacePresets,
     markBackupTaken,
     replaceState,
     validateState,
