@@ -13,9 +13,12 @@ import {
   type GeneratedContentType,
   type IngestJob,
   type GeneratedContent,
+  type GenerationJob,
+  type GenerateFromMaterialRequest,
   type MaterialIngestRequest,
   type MaterialLibraryConfig,
   type MaterialType,
+  type MaterialIngestResult,
   type Preset,
 } from "@theteacher/shared";
 
@@ -35,7 +38,8 @@ import {
 import {
   createContent,
   createLearning,
-  createMaterial,
+  generateFromMaterial,
+  ingestMaterial,
   createSession,
   fetchContents,
   fetchLearnings,
@@ -47,11 +51,12 @@ import {
   createPreset,
   updatePreset,
   deletePreset as deletePresetApi,
+  updateMaterial,
   replaceSnapshot,
   type SnapshotPayload,
 } from "../lib/api-client";
 import { buildBackupSnapshot, downloadSnapshot, parseSnapshotFile } from "../lib/backup";
-import { useSettings } from "../lib/settings-store";
+import { selectPresetOptions, useSettings } from "../lib/settings-store";
 
 const subjects = [
   { id: "all", label: "すべて" },
@@ -316,13 +321,18 @@ const LearningListSurface: Component = () => {
 
 const LearningDetailSurface: Component = () => {
   const navigate = useNavigate();
+  const settings = useSettings();
   const [searchParams, setSearchParams] = useSearchParams();
   const [tab, setTab] = createSignal<GeneratedContentType>(
     detailTabs[0].id as GeneratedContentType,
   );
-  const [selectedPreset, setSelectedPreset] = createSignal(
+  const [ingestPresetId, setIngestPresetId] = createSignal(
     materialIngestPresets[0].id,
   );
+  const [generationPresetId, setGenerationPresetId] = createSignal(
+    settings.state.presets[0]?.id ?? "",
+  );
+  const [selectedMaterialId, setSelectedMaterialId] = createSignal<string>();
   const [libraryConfig, setLibraryConfig] =
     createSignal<MaterialLibraryConfig>();
   const [ingestQueue, setIngestQueue] = createSignal<IngestJob[]>([]);
@@ -332,6 +342,8 @@ const LearningDetailSurface: Component = () => {
   const [materialFileName, setMaterialFileName] = createSignal("");
   const [materialBytes, setMaterialBytes] = createSignal<number | undefined>();
   const [saveMessage, setSaveMessage] = createSignal<string | null>(null);
+  const [isIngesting, setIsIngesting] = createSignal(false);
+  const [isGenerating, setIsGenerating] = createSignal(false);
 
   const [learningList] = createResource(() => true, () =>
     fetchLearnings({ limit: 50 }),
@@ -367,6 +379,15 @@ const LearningDetailSurface: Component = () => {
         {} as Record<GeneratedContentType, GeneratedContent[]>,
       ),
   );
+  const presetOptions = createMemo(() =>
+    selectPresetOptions(settings.state.presets),
+  );
+
+  createEffect(() => {
+    if (!generationPresetId() && presetOptions().length) {
+      setGenerationPresetId(presetOptions()[0].value);
+    }
+  });
 
   createEffect(() => {
     const list = learningList();
@@ -386,6 +407,34 @@ const LearningDetailSurface: Component = () => {
     setLibraryConfig(await resolveLibraryConfig());
   });
 
+  createEffect(() => {
+    const preset = materialIngestPresets.find(
+      (item) => item.id === ingestPresetId(),
+    );
+    if (preset) {
+      setMaterialType(preset.request.source.kind as MaterialType);
+    }
+  });
+
+  createEffect(() => {
+    const list = materials();
+    if (!list?.length) return;
+    if (!selectedMaterialId() || !list.some((m) => m.id === selectedMaterialId())) {
+      setSelectedMaterialId(list[0].id);
+    }
+  });
+
+  createEffect(() => {
+    const subject = learning()?.subject;
+    if (!subject) return;
+    const matched = settings.state.presets.find(
+      (preset) => preset.subject === subject,
+    );
+    if (matched) {
+      setGenerationPresetId(matched.id);
+    }
+  });
+
   const previewContent = (content: Record<string, unknown>) => {
     if (typeof content.title === "string") return content.title;
     if (typeof content.preview === "string") return content.preview;
@@ -398,54 +447,60 @@ const LearningDetailSurface: Component = () => {
     return "ファイル未選択";
   };
 
-  const enqueueIngest = (
-    request: MaterialIngestRequest,
-    config: MaterialLibraryConfig,
-  ) => {
-    const job = bootstrapJobFromRequest(request, config, "queued");
-    setIngestQueue((prev) => [job, ...prev]);
-  };
-
   const handleAddMaterial = async () => {
     const target = learning();
     const config = libraryConfig();
     if (!target || !config) return;
 
-    const rawContent =
-      materialType() === "text" ? materialText().trim() || undefined : undefined;
-    const material = await createMaterial({
-      learningId: target.id,
-      type: materialType(),
-      sourcePath: materialSource(),
-      rawContent,
-      metadata: {
-        name: materialFileName() || undefined,
-        bytes: materialBytes(),
-      },
-    });
+    const textContent = materialText().trim();
+    if (materialType() === "text" && !textContent) {
+      setSaveMessage("テキスト教材を入力してください。");
+      return;
+    }
 
+    const urlValue = materialFileName().trim() || materialSource();
     const source: MaterialIngestRequest["source"] =
-      material.type === "text"
-        ? {
-            kind: "text",
-            text: rawContent ?? material.sourcePath ?? "テキスト",
-          }
-        : material.type === "url"
-          ? { kind: "url", url: material.sourcePath ?? "https://example.com" }
+      materialType() === "text"
+        ? { kind: "text", text: textContent || materialSource() }
+        : materialType() === "url"
+          ? {
+              kind: "url",
+              url: urlValue.startsWith("http") ? urlValue : "https://example.com",
+            }
           : {
-              kind: material.type as Exclude<MaterialType, "text" | "url">,
-              path: material.sourcePath ?? material.metadata?.name ?? "教材ファイル",
+              kind: materialType() as Exclude<MaterialType, "text" | "url">,
+              path: materialFileName() || materialSource(),
             };
 
-    enqueueIngest(
-      { source, learningId: material.learningId, preferOffline: true },
-      config,
-    );
-    setMaterialText("");
-    setMaterialFileName("");
-    setMaterialBytes(undefined);
-    await refetchMaterials();
-    setSaveMessage("教材を追加し、インデックス投入をキューに載せました。");
+    setIsIngesting(true);
+    try {
+      const result = await ingestMaterial({
+        learningId: target.id,
+        source,
+        preferOffline: true,
+      });
+      setIngestQueue((prev) => [result.job, ...prev]);
+      setSelectedMaterialId(result.material.id);
+      if (result.material.rawContent) {
+        setMaterialText(result.material.rawContent.slice(0, 4000));
+      } else {
+        setMaterialText("");
+      }
+      setMaterialFileName("");
+      setMaterialBytes(undefined);
+      await refetchMaterials();
+      setSaveMessage(
+        `教材(${result.material.type})を保存し、抽出テキストを反映しました。`,
+      );
+    } catch (error) {
+      setSaveMessage(
+        error instanceof Error
+          ? `教材の追加に失敗しました: ${error.message}`
+          : "教材の追加に失敗しました。",
+      );
+    } finally {
+      setIsIngesting(false);
+    }
   };
 
   const handleFileInput = async (fileList: FileList | null) => {
@@ -470,21 +525,39 @@ const LearningDetailSurface: Component = () => {
   const addGeneratedDraft = async () => {
     const target = learning();
     if (!target) return;
-    const type = tab();
-    await createContent({
-      learningId: target.id,
-      materialId: (materials() ?? [])[0]?.id,
-      type,
-      content: {
-        title: `${generatedTypeLabels[type]}のドラフト`,
-        preview:
-          materialText().slice(0, 120) ||
-          "教材から生成したコンテンツのプレースホルダー",
-      },
-      promptPreset: selectedPreset(),
-    });
-    await refetchContents();
-    setSaveMessage(`${generatedTypeLabels[type]} をバックエンドに保存しました。`);
+    const preset = settings.state.presets.find(
+      (item) => item.id === generationPresetId(),
+    );
+    const materialId = selectedMaterialId();
+
+    setIsGenerating(true);
+    try {
+      const result = await generateFromMaterial({
+        learningId: target.id,
+        materialId,
+        types: [tab()],
+        presetId: preset?.id,
+        presetTitle: preset?.title,
+        presetSystemPrompt: preset?.systemPrompt,
+        presetUserTemplate: preset?.userInstructionTemplate,
+      });
+      await refetchContents();
+      setSaveMessage(
+        `${generatedTypeLabels[tab()]} を ${result.items.length} 件生成しました。`,
+      );
+      const generatedMaterialId = result.material?.id ?? materialId;
+      if (generatedMaterialId) {
+        setSelectedMaterialId(generatedMaterialId);
+      }
+    } catch (error) {
+      setSaveMessage(
+        error instanceof Error
+          ? `生成に失敗しました: ${error.message}`
+          : "生成に失敗しました。",
+      );
+    } finally {
+      setIsGenerating(false);
+    }
   };
 
   if (!learning()) {
@@ -584,12 +657,48 @@ const LearningDetailSurface: Component = () => {
                 )}
               </For>
             </div>
-            <button
-              class="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-100"
-              onClick={addGeneratedDraft}
-            >
-              + 生成（モック）
-            </button>
+            <div class="flex flex-wrap items-center gap-2 text-xs">
+              <select
+                value={selectedMaterialId() ?? ""}
+                onChange={(e) => setSelectedMaterialId(e.currentTarget.value)}
+                class="rounded-lg border border-slate-200 px-2 py-2 text-xs text-slate-800"
+              >
+                <Show
+                  when={(materials() ?? []).length > 0}
+                  fallback={<option value="">教材未登録</option>}
+                >
+                  <For each={materials() ?? []}>
+                    {(mat) => (
+                      <option value={mat.id}>
+                        {mat.metadata?.name ??
+                          mat.sourcePath ??
+                          `${mat.type.toUpperCase()}教材`}
+                      </option>
+                    )}
+                  </For>
+                </Show>
+              </select>
+              <select
+                value={generationPresetId()}
+                onChange={(e) => setGenerationPresetId(e.currentTarget.value)}
+                class="rounded-lg border border-slate-200 px-2 py-2 text-xs text-slate-800"
+              >
+                <For each={presetOptions()}>
+                  {(preset) => (
+                    <option value={preset.value}>{preset.label}</option>
+                  )}
+                </For>
+              </select>
+              <button
+                class="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-70"
+                onClick={addGeneratedDraft}
+                disabled={isGenerating() || (materials() ?? []).length === 0}
+              >
+                {isGenerating()
+                  ? "生成中..."
+                  : `${generatedTypeLabels[tab()]}生成`}
+              </button>
+            </div>
           </div>
 
           <div class="mt-4 space-y-3">

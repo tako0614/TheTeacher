@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { isoDateTimeString, materialTypeSchema } from "./domain";
+import { isoDateTimeString, materialSchema, materialTypeSchema } from "./domain";
 
 export const ocrEngineSchema = z.enum([
   "native_tesseract",
@@ -102,3 +102,18 @@ export type IngestJob = z.infer<typeof ingestJobSchema>;
 export type MaterialLibraryConfig = z.infer<typeof libraryConfigSchema>;
 export type MaterialLibraryEntry = z.infer<typeof libraryEntrySchema>;
 export type MaterialIngestRequest = z.infer<typeof ingestRequestSchema>;
+
+export const extractedSummarySchema = z.object({
+  preview: z.string().min(1),
+  tokens: z.number().int().nonnegative().optional(),
+  format: z.enum(["plain", "ocr", "transcript", "scraped"]).default("plain"),
+});
+
+export const materialIngestResultSchema = z.object({
+  material: materialSchema,
+  job: ingestJobSchema,
+  extracted: extractedSummarySchema.optional(),
+});
+
+export type ExtractedSummary = z.infer<typeof extractedSummarySchema>;
+export type MaterialIngestResult = z.infer<typeof materialIngestResultSchema>;

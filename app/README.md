@@ -6,7 +6,7 @@ SolidJS + Tailwind + Tauri client for the AI-first study experience described in
 - Bootstrap Vite + Tauri scaffold with strict TypeScript config and Tailwind.
 - Build learning surfaces: list, detail (tabs for Q&A / practice / summary / podcast), practice screen, presets/settings.
 - Wire AI calls through shared client once backend/proxy is in place.
-- Persist Learning, Material, GeneratedContent, PracticeSession locally (SQLite/IndexedDB).
+- Persist Learning, Material, GeneratedContent, PracticeSession via backend APIs (no local DB).
 
 ## Dev tasks (next)
 1. Initialize Vite (Solid) + Tauri project here and align scripts with root `package.json`.

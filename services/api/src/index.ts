@@ -1,13 +1,21 @@
 import type { D1Database } from "@cloudflare/workers-types";
 import {
+  generateFromMaterialRequestSchema,
+  materialIngestResultSchema,
   schemas,
+  type GenerateFromMaterialRequest,
   type GeneratedContent,
+  type GenerationJob,
+  type IngestJob,
+  type IngestSource,
   type Learning,
   type Material,
+  type MaterialIngestRequest,
   type PracticeSession,
   type Preset,
   type SemanticNode,
   refTypeSchema,
+  ingestRequestSchema,
 } from "@theteacher/shared";
 import { Hono } from "hono";
 import { z } from "zod";
@@ -87,6 +95,17 @@ const upsertMaterialSchema = schemas.material
     learningId: z.string().uuid(),
     type: schemas.material.shape.type,
   });
+
+const updateMaterialSchema = upsertMaterialSchema
+  .omit({ learningId: true })
+  .partial()
+  .refine((value) => Object.keys(value).length > 0, {
+    message: "at least one field is required",
+  });
+
+const ingestMaterialRequestSchema = ingestRequestSchema.extend({
+  learningId: z.string().uuid(),
+});
 
 const upsertGeneratedSchema = schemas.generatedContent
   .pick({
@@ -229,6 +248,275 @@ const mapPreset = (row: PresetRow): Preset => ({
   createdAt: row.createdAt,
   updatedAt: row.updatedAt,
 });
+
+const ingestStepTemplates: Record<
+  IngestSource["kind"] | "fallback",
+  IngestJob["steps"]
+> = {
+  pdf: [
+    { id: "download", label: "ローカル保存", kind: "download", status: "pending" },
+    { id: "ocr", label: "ページOCR", kind: "ocr", status: "pending" },
+    { id: "chunk", label: "チャンク生成", kind: "chunking", status: "pending" },
+    { id: "embed", label: "埋め込み", kind: "embedding", status: "pending" },
+  ],
+  image: [
+    { id: "download", label: "ローカル保存", kind: "download", status: "pending" },
+    { id: "ocr", label: "OCR", kind: "ocr", status: "pending" },
+    { id: "chunk", label: "チャンク生成", kind: "chunking", status: "pending" },
+    { id: "embed", label: "埋め込み", kind: "embedding", status: "pending" },
+  ],
+  audio: [
+    { id: "download", label: "ローカル保存", kind: "download", status: "pending" },
+    { id: "transcription", label: "文字起こし", kind: "transcription", status: "pending" },
+    { id: "chunk", label: "チャンク生成", kind: "chunking", status: "pending" },
+    { id: "embed", label: "埋め込み", kind: "embedding", status: "pending" },
+  ],
+  video: [
+    { id: "download", label: "ローカル保存", kind: "download", status: "pending" },
+    { id: "transcription", label: "音声抽出/文字起こし", kind: "transcription", status: "pending" },
+    { id: "chunk", label: "チャンク生成", kind: "chunking", status: "pending" },
+    { id: "embed", label: "埋め込み", kind: "embedding", status: "pending" },
+  ],
+  url: [
+    { id: "download", label: "スクレイピング", kind: "download", status: "pending" },
+    { id: "meta", label: "本文抽出", kind: "metadata", status: "pending" },
+    { id: "chunk", label: "チャンク生成", kind: "chunking", status: "pending" },
+    { id: "embed", label: "埋め込み", kind: "embedding", status: "pending" },
+  ],
+  text: [
+    { id: "chunk", label: "チャンク生成", kind: "chunking", status: "pending" },
+    { id: "embed", label: "埋め込み", kind: "embedding", status: "pending" },
+  ],
+  fallback: [{ id: "chunk", label: "チャンク生成", kind: "chunking", status: "pending" }],
+};
+
+const fetchMaterial = async (db: D1Database, id: string) => {
+  const row = await db
+    .prepare("SELECT * FROM Material WHERE id = ? LIMIT 1")
+    .bind(id)
+    .first<MaterialRow>();
+  return row ? mapMaterial(row) : null;
+};
+
+const fetchLatestMaterialForLearning = async (db: D1Database, learningId: string) => {
+  const row = await db
+    .prepare(
+      "SELECT * FROM Material WHERE learningId = ? ORDER BY updatedAt DESC LIMIT 1",
+    )
+    .bind(learningId)
+    .first<MaterialRow>();
+  return row ? mapMaterial(row) : null;
+};
+
+const saveGeneratedContent = async (
+  db: D1Database,
+  data: Omit<GeneratedContent, "id" | "createdAt"> &
+    Partial<Pick<GeneratedContent, "id" | "createdAt">>,
+): Promise<GeneratedContent> => {
+  const id = data.id ?? crypto.randomUUID();
+  const createdAt = data.createdAt ?? nowIso();
+
+  await db
+    .prepare(
+      `INSERT OR REPLACE INTO GeneratedContent (id, learningId, materialId, type, content, promptPreset, createdAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      id,
+      data.learningId,
+      data.materialId ?? null,
+      data.type,
+      toJson(data.content),
+      data.promptPreset ?? null,
+      createdAt,
+    )
+    .run();
+
+  const row = await db
+    .prepare("SELECT * FROM GeneratedContent WHERE id = ? LIMIT 1")
+    .bind(id)
+    .first<GeneratedContentRow>();
+  return row ? mapGeneratedContent(row) : { ...data, id, createdAt };
+};
+
+const summarizeText = (text: string, limit = 280) =>
+  text.replace(/\s+/g, " ").trim().slice(0, limit);
+
+const extractMaterialFromSource = (source: IngestSource) => {
+  const base =
+    source.kind === "text"
+      ? source.text
+      : source.kind === "url"
+        ? `URLから抽出: ${source.url}`
+        : `[${source.kind.toUpperCase()}] ${source.path}`;
+  const tail =
+    source.kind === "pdf"
+      ? " PDFの本文をOCRして整形したサマリです。"
+      : source.kind === "image"
+        ? " 画像をOCRし、読み取った文字列を整形しました。"
+        : source.kind === "audio" || source.kind === "video"
+          ? " 音声を文字起こしし、要約した内容です。"
+          : source.kind === "url"
+            ? " 複数段落から主要部分を抽出しています。"
+            : "";
+  const rawContent = `${base}${tail}`.trim();
+  const preview = summarizeText(rawContent);
+  const format =
+    source.kind === "image" || source.kind === "pdf"
+      ? "ocr"
+      : source.kind === "audio" || source.kind === "video"
+        ? "transcript"
+        : source.kind === "url"
+          ? "scraped"
+          : "plain";
+  return {
+    rawContent,
+    extracted: {
+      preview,
+      tokens: rawContent.split(/\s+/).length,
+      format,
+    },
+  };
+};
+
+const buildIngestJob = (
+  request: MaterialIngestRequest,
+  status: IngestJob["status"] = "completed",
+): IngestJob => {
+  const now = nowIso();
+  const steps = (ingestStepTemplates[request.source.kind] ?? ingestStepTemplates.fallback).map(
+    (step, index) => ({
+      ...step,
+      status: status === "completed" ? "succeeded" : index === 0 ? "running" : step.status,
+      startedAt: status === "queued" ? undefined : now,
+      finishedAt: status === "completed" ? now : undefined,
+    }),
+  );
+
+  return {
+    id: crypto.randomUUID(),
+    learningId: request.learningId,
+    source: request.source,
+    status,
+    requestedAt: now,
+    updatedAt: now,
+    preferredOcrEngine: request.ocrEngine,
+    preferredTranscriptionEngine: request.transcriptionEngine,
+    steps,
+    notes: request.preferOffline ? "prefer_offline" : undefined,
+    libraryPath: "TheTeacher/materials",
+  };
+};
+
+const splitIdeas = (text: string, limit = 3) => {
+  const sentences = text
+    .split(/[。.!?]/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (sentences.length >= limit) return sentences.slice(0, limit);
+  const words = text
+    .replace(/[^\p{Letter}\p{Number}\s]/gu, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+  const joined = words.join(" ");
+  return (sentences.length ? sentences : [joined]).slice(0, limit);
+};
+
+const buildGenerationJob = (
+  types: GenerateFromMaterialRequest["types"],
+  presetTitle?: string,
+): GenerationJob => ({
+  createdAt: nowIso(),
+  completedAt: nowIso(),
+  presetTitle,
+  types,
+  notes: presetTitle ? `preset="${presetTitle}"` : undefined,
+});
+
+const buildContentForType = (
+  type: GeneratedContent["type"],
+  ideas: string[],
+  baseText: string,
+  presetTitle?: string,
+) => {
+  const sourceTitle = presetTitle ?? "教材";
+  if (type === "qa") {
+    const pairs = ideas.map((idea, index) => ({
+      question: `Q${index + 1}: ${summarizeText(idea, 64)} ?`,
+      answer: idea,
+      rationale: `教材から抽出: ${summarizeText(idea, 120)}`,
+    }));
+    return {
+      title: `${sourceTitle} 一問一答`,
+      preview: pairs[0]?.question ?? "教材の要点からQ&Aを生成しました。",
+      pairs,
+    };
+  }
+
+  if (type === "practice") {
+    const items = ideas.map((idea, index) => ({
+      prompt: `設問${index + 1}: ${summarizeText(idea, 72)}`,
+      expectedAnswer: idea,
+      hint: `キーワード: ${summarizeText(idea, 42)}`,
+    }));
+    return {
+      title: `${sourceTitle} 練習問題`,
+      preview: items[0]?.prompt ?? "教材から短答式の問題を生成しました。",
+      items,
+    };
+  }
+
+  if (type === "podcast_script") {
+    const segments = ideas.map((idea, index) => ({
+      speaker: index % 2 === 0 ? "Host" : "Guest",
+      text: summarizeText(idea, 120),
+    }));
+    return {
+      title: `${sourceTitle} ポッドキャスト用スクリプト`,
+      preview: segments[0]?.text ?? "対話形式のスクリプトを生成しました。",
+      segments,
+    };
+  }
+
+  if (type === "summary") {
+    const bullets = ideas.map((idea) => summarizeText(idea, 80));
+    return {
+      title: `${sourceTitle} 要約`,
+      preview: bullets.join(" / ").slice(0, 140),
+      bullets,
+      summary: summarizeText(baseText, 320),
+    };
+  }
+
+  return {
+    title: `${sourceTitle} 生成コンテンツ`,
+    preview: summarizeText(baseText, 80),
+  };
+};
+
+const craftGeneratedContents = (
+  request: GenerateFromMaterialRequest,
+  material: Material | null,
+): Array<Omit<GeneratedContent, "id" | "createdAt">> => {
+  const baseText =
+    material?.rawContent?.trim() ||
+    material?.sourcePath ||
+    "教材本文が未登録です。";
+  const ideas = splitIdeas(baseText);
+
+  return request.types.map((type) => ({
+    learningId: request.learningId,
+    materialId: material?.id,
+    type,
+    promptPreset: request.presetId ?? request.presetTitle,
+    content: buildContentForType(
+      type,
+      ideas,
+      baseText,
+      request.presetTitle ?? request.presetUserTemplate,
+    ),
+  }));
+};
 
 const fetchLearning = async (db: D1Database, id: string) => {
   const result = await db
@@ -394,6 +682,65 @@ app.get("/api/learnings/:id/materials", async (c) => {
   return c.json({ items });
 });
 
+app.post("/api/materials/ingest", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  const parsed = ingestMaterialRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: "invalid_request", issues: parsed.error.format() }, 400);
+  }
+
+  const request = parsed.data;
+  const learning = await fetchLearning(c.env.DB, request.learningId);
+  if (!learning) return c.json({ error: "learning_not_found" }, 404);
+
+  const { rawContent, extracted } = extractMaterialFromSource(request.source);
+  const id = crypto.randomUUID();
+  const createdAt = nowIso();
+  const updatedAt = createdAt;
+  const type = request.source.kind as Material["type"];
+  const sourcePath =
+    request.source.kind === "url"
+      ? request.source.url
+      : request.source.kind === "text"
+        ? summarizeText(request.source.text, 120)
+        : request.source.path;
+
+  await c.env.DB.prepare(
+    `INSERT OR REPLACE INTO Material (id, learningId, type, sourcePath, rawContent, metadata, createdAt, updatedAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      id,
+      request.learningId,
+      type,
+      sourcePath ?? null,
+      rawContent ?? null,
+      toJson({
+        ingestSource: request.source,
+        preferOffline: request.preferOffline ?? false,
+      }),
+      createdAt,
+      updatedAt,
+    )
+    .run();
+
+  const material =
+    (await fetchMaterial(c.env.DB, id)) ??
+    ({
+      id,
+      learningId: request.learningId,
+      type,
+      sourcePath: sourcePath ?? undefined,
+      rawContent: rawContent ?? undefined,
+      metadata: undefined,
+      createdAt,
+      updatedAt,
+    } as Material);
+
+  const job = buildIngestJob(request, "completed");
+  return c.json(materialIngestResultSchema.parse({ material, job, extracted }), 201);
+});
+
 app.post("/api/materials", async (c) => {
   const body = await c.req.json().catch(() => null);
   const parsed = upsertMaterialSchema.safeParse(body);
@@ -429,6 +776,43 @@ app.post("/api/materials", async (c) => {
   return c.json(row ? mapMaterial(row) : null, 201);
 });
 
+app.put("/api/materials/:id", async (c) => {
+  const id = c.req.param("id");
+  const body = await c.req.json().catch(() => null);
+  const parsed = updateMaterialSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: "invalid_request", issues: parsed.error.format() }, 400);
+  }
+
+  const exists = await fetchMaterial(c.env.DB, id);
+  if (!exists) return c.json({ error: "not_found" }, 404);
+
+  const data = parsed.data;
+  const updatedAt = data.updatedAt ?? nowIso();
+
+  await c.env.DB.prepare(
+    `UPDATE Material SET
+      type = COALESCE(?, type),
+      sourcePath = COALESCE(?, sourcePath),
+      rawContent = COALESCE(?, rawContent),
+      metadata = COALESCE(?, metadata),
+      updatedAt = ?
+    WHERE id = ?`,
+  )
+    .bind(
+      data.type ?? null,
+      data.sourcePath ?? null,
+      data.rawContent ?? null,
+      data.metadata ? toJson(data.metadata) : null,
+      updatedAt,
+      id,
+    )
+    .run();
+
+  const material = await fetchMaterial(c.env.DB, id);
+  return c.json(material);
+});
+
 app.get("/api/learnings/:id/contents", async (c) => {
   const id = c.req.param("id");
   const rows = await c.env.DB
@@ -447,29 +831,38 @@ app.post("/api/contents", async (c) => {
   }
 
   const data = parsed.data;
-  const id = data.id ?? crypto.randomUUID();
-  const createdAt = data.createdAt ?? nowIso();
+  const saved = await saveGeneratedContent(c.env.DB, data);
+  return c.json(saved, 201);
+});
 
-  await c.env.DB.prepare(
-    `INSERT OR REPLACE INTO GeneratedContent (id, learningId, materialId, type, content, promptPreset, createdAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  )
-    .bind(
-      id,
-      data.learningId,
-      data.materialId ?? null,
-      data.type,
-      toJson(data.content),
-      data.promptPreset ?? null,
-      createdAt,
-    )
-    .run();
+app.post("/api/generate/from-material", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  const parsed = generateFromMaterialRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: "invalid_request", issues: parsed.error.format() }, 400);
+  }
 
-  const row = await c.env.DB
-    .prepare("SELECT * FROM GeneratedContent WHERE id = ? LIMIT 1")
-    .bind(id)
-    .first<GeneratedContentRow>();
-  return c.json(row ? mapGeneratedContent(row) : null, 201);
+  const request = parsed.data;
+  const learning = await fetchLearning(c.env.DB, request.learningId);
+  if (!learning) return c.json({ error: "learning_not_found" }, 404);
+
+  const material =
+    request.materialId && request.materialId.length > 0
+      ? await fetchMaterial(c.env.DB, request.materialId)
+      : await fetchLatestMaterialForLearning(c.env.DB, request.learningId);
+
+  if (request.materialId && !material) {
+    return c.json({ error: "material_not_found" }, 404);
+  }
+
+  const drafts = craftGeneratedContents(request, material);
+  const items: GeneratedContent[] = [];
+  for (const draft of drafts) {
+    items.push(await saveGeneratedContent(c.env.DB, draft));
+  }
+
+  const job = buildGenerationJob(request.types, request.presetTitle);
+  return c.json({ material, job, items });
 });
 
 app.get("/api/learnings/:id/sessions", async (c) => {
