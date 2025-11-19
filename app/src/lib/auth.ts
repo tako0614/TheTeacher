@@ -1,3 +1,5 @@
+import type { AuthSessionResponse, BootstrapSessionRequest } from "@theteacher/shared";
+
 const STORAGE_KEY = "theteacher/session-token";
 
 let cachedToken: string | null = null;
@@ -22,31 +24,31 @@ export const clearSessionToken = () => {
   getStorage()?.removeItem(STORAGE_KEY);
 };
 
-export type BootstrapSessionResponse = {
-  token: string;
-  user: {
-    id: string;
-    displayName?: string;
-    email?: string;
-  };
+const buildDeviceName = (deviceName?: string) => {
+  if (deviceName?.trim()) return deviceName.trim();
+  return typeof navigator !== "undefined" ? navigator.userAgent.slice(0, 80) : "desktop";
 };
 
 const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL?.replace(/\/+$/, "") ?? "http://127.0.0.1:8787";
 
-export const bootstrapAnonymousSession = async (): Promise<BootstrapSessionResponse> => {
+export const bootstrapSession = async (
+  input?: Partial<BootstrapSessionRequest>,
+): Promise<AuthSessionResponse> => {
   const res = await fetch(`${API_BASE_URL}/api/auth/anonymous`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      deviceName: typeof navigator !== "undefined" ? navigator.userAgent.slice(0, 80) : "desktop",
+      deviceName: buildDeviceName(input?.deviceName),
+      email: input?.email?.trim() || undefined,
+      displayName: input?.displayName?.trim() || undefined,
     }),
   });
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
     throw new Error(`Failed to bootstrap session: ${text}`);
   }
-  const json = (await res.json()) as BootstrapSessionResponse;
+  const json = (await res.json()) as AuthSessionResponse;
   persistSessionToken(json.token);
   return json;
 };
@@ -54,6 +56,9 @@ export const bootstrapAnonymousSession = async (): Promise<BootstrapSessionRespo
 export const ensureSessionToken = async () => {
   const existing = readSessionToken();
   if (existing) return existing;
-  const { token } = await bootstrapAnonymousSession();
+  const { token } = await bootstrapSession();
   return token;
 };
+
+export const bootstrapAnonymousSession = (deviceName?: string) =>
+  bootstrapSession({ deviceName });

@@ -43,6 +43,7 @@ import {
   proxyChat,
   semanticSearch,
 } from "../lib/ai";
+import { useAuth } from "../lib/auth-store";
 import {
   createContent,
   createLearning,
@@ -521,11 +522,12 @@ const LearningDetailSurface: Component = () => {
     }
 
     setIsIngesting(true);
+    const preferOffline = shouldPreferOffline(materialType());
     try {
       const result = await ingestMaterial({
         learningId: target.id,
         source,
-        preferOffline: true,
+        preferOffline,
         payload,
       });
       setIngestQueue((prev) => [result.job, ...prev]);
@@ -2570,6 +2572,9 @@ const detectMaterialType = (file: File): MaterialType => {
   return "text";
 };
 
+const shouldPreferOffline = (type: MaterialType) =>
+  !(type === "audio" || type === "video" || type === "url");
+
 const formatFileSize = (value?: number) => {
   if (!value) return "サイズ不明";
   if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`;
@@ -2817,6 +2822,7 @@ const MaterialSettingsSurface: Component = () => {
     try {
       const type = detectMaterialType(file);
       const processed = await processMaterialFile(file, type);
+      const preferOffline = shouldPreferOffline(type);
       const payload: MaterialIngestRequest["payload"] = {
         text: processed.text,
         dataUrl: processed.dataUrl,
@@ -2831,7 +2837,7 @@ const MaterialSettingsSurface: Component = () => {
       const result = await ingestMaterial({
         learningId: selectedLearningId()!,
         source,
-        preferOffline: true,
+        preferOffline,
         payload,
       });
       await Promise.all([refetchMaterials(), refetchLibrary()]);
@@ -4058,6 +4064,16 @@ const NewLearningSurface: Component = () => {
 
 const AppSettingsSurface: Component = () => {
   const settings = useSettings();
+  const auth = useAuth();
+  const defaultDeviceName =
+    typeof navigator !== "undefined" ? navigator.userAgent.slice(0, 30) : "desktop";
+  const [email, setEmail] = createSignal(auth.state.user?.email ?? "");
+  const [displayName, setDisplayName] = createSignal(auth.state.user?.displayName ?? "");
+  const [deviceName, setDeviceName] = createSignal(defaultDeviceName);
+  const [accountMessage, setAccountMessage] = createSignal<string | null>(null);
+  const [accountError, setAccountError] = createSignal<string | null>(null);
+  const [isSavingProfile, setIsSavingProfile] = createSignal(false);
+  const [isIssuingSession, setIsIssuingSession] = createSignal(false);
 
   const [editingPresetId, setEditingPresetId] = createSignal<string | undefined>();
   const [presetSubject, setPresetSubject] = createSignal("math");
@@ -4109,6 +4125,13 @@ const AppSettingsSurface: Component = () => {
     resetPresetDraft();
     void syncPresetsFromApi();
   });
+
+  const syncAuthFields = () => {
+    setEmail(auth.state.user?.email ?? "");
+    setDisplayName(auth.state.user?.displayName ?? "");
+  };
+
+  createEffect(syncAuthFields);
 
   const savePreset = async () => {
     setBackupError(null);
@@ -4250,6 +4273,90 @@ const AppSettingsSurface: Component = () => {
 
   const triggerImport = () => importInputRef?.click();
 
+  const saveProfile = async () => {
+    setAccountError(null);
+    setAccountMessage(null);
+    const emailValue = email().trim();
+    const displayNameValue = displayName().trim();
+    if (!emailValue && !displayNameValue) {
+      setAccountError("メールアドレスか表示名を入力してください。");
+      return;
+    }
+    setIsSavingProfile(true);
+    try {
+      const user = await auth.updateProfile({
+        email: emailValue || undefined,
+        displayName: displayNameValue || undefined,
+      });
+      setAccountMessage("プロフィールを更新しました。別端末では同じメールでサインインしてください。");
+      setEmail(user.email ?? emailValue);
+      setDisplayName(user.displayName ?? displayNameValue);
+    } catch (error) {
+      setAccountError(
+        error instanceof Error ? error.message : "プロフィールの保存に失敗しました。",
+      );
+    } finally {
+      setIsSavingProfile(false);
+    }
+  };
+
+  const signInWithEmail = async () => {
+    setAccountError(null);
+    setAccountMessage(null);
+    const emailValue = email().trim();
+    if (!emailValue) {
+      setAccountError("サインインにはメールアドレスが必要です。");
+      return;
+    }
+    setIsSavingProfile(true);
+    try {
+      const response = await auth.signIn({
+        email: emailValue,
+        displayName: displayName().trim() || undefined,
+        deviceName: deviceName().trim() || undefined,
+      });
+      setAccountMessage(
+        `サインインしました: ${response.user.displayName ?? response.user.email ?? "user"}`,
+      );
+    } catch (error) {
+      setAccountError(
+        error instanceof Error ? error.message : "サインインに失敗しました。",
+      );
+    } finally {
+      setIsSavingProfile(false);
+    }
+  };
+
+  const issueNewSession = async () => {
+    setAccountError(null);
+    setAccountMessage(null);
+    setIsIssuingSession(true);
+    try {
+      const response = await auth.rotateSession(deviceName().trim() || undefined);
+      setAccountMessage(
+        `新しいセッショントークンを発行しました (${response.session.deviceName ?? "this device"})`,
+      );
+    } catch (error) {
+      setAccountError(
+        error instanceof Error ? error.message : "セッショントークンの発行に失敗しました。",
+      );
+    } finally {
+      setIsIssuingSession(false);
+    }
+  };
+
+  const signOut = () => {
+    auth.signOut();
+    setAccountMessage("ローカルのセッションをクリアしました。");
+    setAccountError(null);
+  };
+
+  const currentUserLabel = () =>
+    auth.state.user?.displayName ?? auth.state.user?.email ?? "未登録ユーザー";
+  const authError = () => accountError() ?? auth.state.error;
+  const isAuthLoading = () =>
+    auth.state.status === "loading" || isSavingProfile() || isIssuingSession();
+
   return (
     <section class="space-y-6">
       <header class="space-y-2">
@@ -4263,6 +4370,134 @@ const AppSettingsSurface: Component = () => {
           モデル設定とプリセットのテーブル、バックアップ/エクスポートの状態を1画面にまとめています。
         </p>
       </header>
+
+      <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div class="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+          <div class="space-y-1">
+            <p class="text-xs font-semibold uppercase text-slate-500">
+              アカウント / マルチデバイス
+            </p>
+            <h2 class="text-lg font-bold text-slate-900">
+              メール登録とセッション発行で端末をまたいで同期
+            </h2>
+            <p class="text-sm text-slate-600">
+              まず現在のセッションにメールをひも付けてデータを保持し、その後は同じメールでサインインするとUser/UserSessionが共有されます。
+            </p>
+          </div>
+          <div class="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-700">
+            <p>
+              ユーザー:{" "}
+              <span class="font-semibold text-slate-900">{currentUserLabel()}</span>
+            </p>
+            <p>
+              デバイス:{" "}
+              <span class="font-semibold text-slate-900">
+                {auth.state.session?.deviceName ?? "未登録"}
+              </span>
+            </p>
+            <p>
+              有効期限:{" "}
+              <span class="font-semibold text-slate-900">
+                {formatDateTime(auth.state.session?.expiresAt)}
+              </span>
+            </p>
+          </div>
+        </div>
+
+        <div class="mt-4 grid gap-4 md:grid-cols-2">
+          <div class="space-y-2">
+            <p class="text-xs font-semibold text-slate-500">
+              現在のユーザーにメールを登録
+            </p>
+            <label class="flex flex-col gap-1 text-sm">
+              <span class="text-xs font-semibold text-slate-600">メールアドレス</span>
+              <input
+                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+                placeholder="you@example.com"
+                value={email()}
+                onInput={(event) => setEmail(event.currentTarget.value)}
+              />
+            </label>
+            <label class="flex flex-col gap-1 text-sm">
+              <span class="text-xs font-semibold text-slate-600">表示名</span>
+              <input
+                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+                placeholder="表示名 (任意)"
+                value={displayName()}
+                onInput={(event) => setDisplayName(event.currentTarget.value)}
+              />
+            </label>
+            <div class="flex flex-wrap gap-2">
+              <button
+                class="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
+                onClick={saveProfile}
+                disabled={isAuthLoading()}
+              >
+                {isAuthLoading() ? "処理中..." : "メールを登録/更新"}
+              </button>
+              <button
+                class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                onClick={signOut}
+                disabled={isAuthLoading()}
+              >
+                サインアウト
+              </button>
+            </div>
+            <p class="text-[11px] text-slate-500">
+              ここでメールを追加すると、現在の学習データを保持したまま他端末から同じメールでサインインできます。
+            </p>
+          </div>
+
+          <div class="space-y-2">
+            <p class="text-xs font-semibold text-slate-500">
+              既存メールでサインイン / セッション再発行
+            </p>
+            <label class="flex flex-col gap-1 text-sm">
+              <span class="text-xs font-semibold text-slate-600">端末名</span>
+              <input
+                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+                placeholder="macbook-pro / ipad など"
+                value={deviceName()}
+                onInput={(event) => setDeviceName(event.currentTarget.value)}
+              />
+            </label>
+            <div class="flex flex-wrap gap-2">
+              <button
+                class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                onClick={signInWithEmail}
+                disabled={isAuthLoading()}
+              >
+                {isAuthLoading() ? "処理中..." : "メールでサインイン/作成"}
+              </button>
+              <button
+                class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                onClick={issueNewSession}
+                disabled={isAuthLoading()}
+              >
+                {isIssuingSession() ? "再発行中..." : "この端末のセッションを再発行"}
+              </button>
+            </div>
+            <div class="rounded-lg bg-slate-50 px-3 py-2 text-[11px] text-slate-700">
+              <p class="font-semibold text-slate-800">セッショントークン</p>
+              <p class="break-all font-mono text-[11px] text-slate-800">
+                {auth.state.token ?? "未生成"}
+              </p>
+              <p class="text-[11px] text-slate-500">
+                必要ならこのトークンを手動で他端末に貼り付けて復元できます（取り扱いに注意）。
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div class="mt-2 space-y-1">
+          <Show when={accountMessage()}>
+            <p class="text-xs text-emerald-700">{accountMessage()}</p>
+          </Show>
+          <Show when={authError()}>
+            <p class="text-xs text-rose-700">{authError()}</p>
+          </Show>
+        </div>
+      </div>
 
       <div class="grid gap-4 md:grid-cols-[1.1fr_0.9fr]">
         <div class="space-y-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">

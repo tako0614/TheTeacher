@@ -13,10 +13,10 @@ export interface LearningRow {
   userId: string;
   title: string;
   subject?: string | null;
-  tags?: string | null;
+  tags?: string | null | unknown;
   progress?: number | null;
-  createdAt: string;
-  updatedAt: string;
+  createdAt: string | Date;
+  updatedAt: string | Date;
 }
 
 export interface MaterialRow {
@@ -26,9 +26,9 @@ export interface MaterialRow {
   type: MaterialType;
   sourcePath?: string | null;
   rawContent?: string | null;
-  metadata?: string | null;
-  createdAt: string;
-  updatedAt: string;
+  metadata?: string | null | unknown;
+  createdAt: string | Date;
+  updatedAt: string | Date;
 }
 
 export interface GeneratedContentRow {
@@ -37,9 +37,9 @@ export interface GeneratedContentRow {
   learningId: string;
   materialId?: string | null;
   type: GeneratedContentType;
-  content: string;
+  content: string | unknown;
   promptPreset?: string | null;
-  createdAt: string;
+  createdAt: string | Date;
 }
 
 export interface PracticeSessionRow {
@@ -47,12 +47,12 @@ export interface PracticeSessionRow {
   userId: string;
   learningId: string;
   generatedContentId?: string | null;
-  questionRef?: string | null;
+  questionRef?: string | null | unknown;
   answerText: string;
   isCorrect?: number | null;
-  feedback?: string | null;
+  feedback?: string | null | unknown;
   score?: number | null;
-  createdAt: string;
+  createdAt: string | Date;
 }
 
 export interface PresetRow {
@@ -62,8 +62,8 @@ export interface PresetRow {
   title: string;
   systemPrompt: string;
   userInstructionTemplate: string;
-  createdAt: string;
-  updatedAt: string;
+  createdAt: string | Date;
+  updatedAt: string | Date;
 }
 
 export type LearningWithStatsRow = LearningRow & {
@@ -110,17 +110,17 @@ export interface SemanticNodeRow {
   userId: string;
   refType: SemanticNode["refType"];
   refId: string;
-  embedding?: string | null;
-  metadata?: string | null;
+  embedding?: string | null | unknown;
+  metadata?: string | null | unknown;
 }
 
 export interface UserRow {
   id: string;
   email?: string | null;
   displayName?: string | null;
-  createdAt: string;
-  updatedAt: string;
-  lastSeenAt?: string | null;
+  createdAt: string | Date;
+  updatedAt: string | Date;
+  lastSeenAt?: string | Date | null;
 }
 
 export interface UserSessionRow {
@@ -128,10 +128,10 @@ export interface UserSessionRow {
   userId: string;
   tokenHash: string;
   deviceName?: string | null;
-  lastSeenAt?: string | null;
-  expiresAt?: string | null;
-  createdAt: string;
-  updatedAt: string;
+  lastSeenAt?: string | Date | null;
+  expiresAt?: string | Date | null;
+  createdAt: string | Date;
+  updatedAt: string | Date;
 }
 
 export const parseJson = <T = JsonValue>(value?: string | null): T | undefined => {
@@ -181,17 +181,32 @@ export const mapUser = (row: UserRow) => ({
   id: row.id,
   email: row.email ?? undefined,
   displayName: row.displayName ?? undefined,
-  createdAt: row.createdAt,
-  updatedAt: row.updatedAt,
-  lastSeenAt: row.lastSeenAt ?? undefined,
+  createdAt: typeof row.createdAt === "string" ? row.createdAt : row.createdAt.toISOString(),
+  updatedAt: typeof row.updatedAt === "string" ? row.updatedAt : row.updatedAt.toISOString(),
+  lastSeenAt:
+    row.lastSeenAt === null || row.lastSeenAt === undefined
+      ? undefined
+      : typeof row.lastSeenAt === "string"
+        ? row.lastSeenAt
+        : row.lastSeenAt.toISOString(),
 });
 
 export const mapUserSession = (row: UserSessionRow) => ({
   id: row.id,
   userId: row.userId,
   deviceName: row.deviceName ?? undefined,
-  lastSeenAt: row.lastSeenAt ?? undefined,
-  expiresAt: row.expiresAt ?? undefined,
-  createdAt: row.createdAt,
-  updatedAt: row.updatedAt,
+  lastSeenAt:
+    row.lastSeenAt === null || row.lastSeenAt === undefined
+      ? undefined
+      : typeof row.lastSeenAt === "string"
+        ? row.lastSeenAt
+        : row.lastSeenAt.toISOString(),
+  expiresAt:
+    row.expiresAt === null || row.expiresAt === undefined
+      ? undefined
+      : typeof row.expiresAt === "string"
+        ? row.expiresAt
+        : row.expiresAt.toISOString(),
+  createdAt: typeof row.createdAt === "string" ? row.createdAt : row.createdAt.toISOString(),
+  updatedAt: typeof row.updatedAt === "string" ? row.updatedAt : row.updatedAt.toISOString(),
 });

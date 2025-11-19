@@ -14,6 +14,11 @@ export const issueSessionRequestSchema = z.object({
   deviceName: z.string().trim().min(1).optional(),
 });
 
+export const updateUserProfileRequestSchema = z.object({
+  email: z.string().email().optional(),
+  displayName: z.string().trim().min(1).optional(),
+});
+
 export const authSessionResponseSchema = z.object({
   user: userSchema,
   session: userSessionSchema,
@@ -23,3 +28,4 @@ export const authSessionResponseSchema = z.object({
 export type AuthSessionResponse = z.infer<typeof authSessionResponseSchema>;
 export type BootstrapSessionRequest = z.infer<typeof bootstrapSessionRequestSchema>;
 export type IssueSessionRequest = z.infer<typeof issueSessionRequestSchema>;
+export type UpdateUserProfileRequest = z.infer<typeof updateUserProfileRequestSchema>;

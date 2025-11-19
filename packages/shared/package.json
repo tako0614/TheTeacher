@@ -8,10 +8,12 @@
     ".": {
       "types": "./src/index.ts",
       "import": "./src/index.ts"
-    }
+    },
+    "./prisma/migrations/*": "./prisma/migrations/*"
   },
   "files": [
-    "dist"
+    "dist",
+    "prisma/migrations"
   ],
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts --clean",

@@ -38,10 +38,11 @@ export const requestJson = async <T>(config: RequestConfig): Promise<T> => {
 
   const url = buildUrl(config.path, config.query);
   const method = config.method ?? "GET";
+  const shouldAttachAuth = !config.skipAuth && Boolean(token);
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...(config.headers ?? {}),
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(shouldAttachAuth && token ? { Authorization: `Bearer ${token}` } : {}),
   };
   const body = config.body ? JSON.stringify(config.body) : undefined;
 

@@ -35,20 +35,20 @@ export const materialIngestPresets: Array<{
   {
     id: "audio",
     label: "音声 / ポッドキャスト",
-    description: "Whisper-rsで文字起こし→チャンク",
+    description: "Whisper(API)で文字起こし→チャンク",
     request: {
       source: { kind: "audio", path: "" },
-      preferOffline: true,
+      preferOffline: false,
       transcriptionEngine: "whisper_rs",
     },
   },
   {
     id: "video",
     label: "動画",
-    description: "音声抽出→Whisper-rs→チャンク",
+    description: "音声抽出+字幕→Whisper(API)→チャンク",
     request: {
       source: { kind: "video", path: "" },
-      preferOffline: true,
+      preferOffline: false,
       transcriptionEngine: "whisper_rs",
     },
   },
@@ -115,7 +115,7 @@ const stepTemplates: Record<
     },
     {
       id: "transcription",
-      label: "音声抽出/文字起こし",
+      label: "音声/字幕抽出",
       kind: "transcription",
       status: "pending",
     },

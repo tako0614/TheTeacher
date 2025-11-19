@@ -1,16 +1,21 @@
 import type {
+  AuthSessionResponse,
   GeneratedContent,
   Learning,
   Material,
   MaterialLibraryEntry,
   PracticeSession,
   Preset,
+  UpdateUserProfileRequest,
+  User,
+  UserSession,
   type GenerateFromMaterialRequest,
   type GenerationResult,
   type MaterialIngestRequest,
   type MaterialIngestResult,
 } from "@theteacher/shared";
 
+import { persistSessionToken } from "./auth";
 import { requestJson } from "./http";
 
 export type LearningSummary = Learning & {
@@ -26,6 +31,31 @@ export type SnapshotPayload = {
   generatedContents: GeneratedContent[];
   practiceSessions: PracticeSession[];
 };
+
+export type AuthSessionState = {
+  user: User;
+  session: UserSession | null;
+};
+
+export const fetchAuthSession = async (): Promise<AuthSessionState> =>
+  requestJson<AuthSessionState>({ path: "/api/auth/session" });
+
+export const issueSession = async (deviceName?: string): Promise<AuthSessionResponse> => {
+  const response = await requestJson<AuthSessionResponse>({
+    path: "/api/auth/sessions",
+    method: "POST",
+    body: { deviceName },
+  });
+  persistSessionToken(response.token);
+  return response;
+};
+
+export const updateUserProfile = async (input: UpdateUserProfileRequest) =>
+  requestJson<{ user: User }>({
+    path: "/api/auth/profile",
+    method: "PUT",
+    body: input,
+  });
 
 export const fetchLearnings = async (params: {
   q?: string;
