@@ -1,4 +1,3 @@
-import type { D1Database, KVNamespace, R2Bucket } from "@cloudflare/workers-types";
 import {
   generateFromMaterialRequestSchema,
   materialIngestResultSchema,
@@ -21,12 +20,9 @@ import {
   type MaterialLibraryEntry,
   type PracticeFeedback,
   type PracticeGradingRequest,
-  type PracticeGradingResponse,
   type PracticeSession,
   type Preset,
   type SemanticNode,
-  type User,
-  type UserSession,
   type ExtractedSummary,
   type SimilarQuestion,
   type RichContentBlock,
@@ -34,601 +30,60 @@ import {
   type RichDiagramBlock,
   richContentDocumentSchema,
   type StructuredValue,
-  refTypeSchema,
-  ingestRequestSchema,
 } from "@theteacher/shared";
 import { Hono } from "hono";
-import type { Context } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { z } from "zod";
-import { PrismaClient, type Prisma } from "@prisma/client/edge";
-import { D1Adapter } from "@prisma/adapter-d1";
+import type { Prisma } from "@prisma/client/edge";
+import type * as PdfJs from "pdfjs-dist/legacy/build/pdf.mjs";
 
 import {
-  mapIngestJob,
-  mapLibraryEntry,
-  mapUser,
-  mapUserSession,
   parseJson,
-  toJson,
   type GeneratedContentRow,
-  type IngestJobRow,
   type LearningWithStatsRow,
-  type LearningRow,
-  type LibraryEntryRow,
   type MaterialRow,
   type PracticeSessionRow,
   type PresetRow,
   type SemanticNodeRow,
-  type UserRow,
-  type UserSessionRow,
 } from "./db";
-import { prismaMigrations } from "./prisma-migrations";
-
-const proxyRequestSchema = z.object({
-  prompt: z.string().min(1, "prompt is required"),
-  model: z.string().default("gpt-4o-mini"),
-  topK: z.number().int().min(1).max(10).default(3).optional(),
-  tone: z.string().trim().min(1).optional(),
-});
-
-const embedRequestSchema = z.object({
-  texts: z.array(z.string().min(1)).min(1),
-});
-
-const semanticSearchRequestSchema = z.object({
-  query: z.string().min(1),
-  topK: z.number().int().min(1).max(10).default(5),
-  refType: refTypeSchema.optional(),
-  subject: z.string().min(1).optional(),
-});
-
-const learningListQuerySchema = z.object({
-  q: z.string().trim().min(1).optional(),
-  subject: z.string().trim().min(1).optional(),
-  tag: z.string().trim().min(1).optional(),
-  limit: z.coerce.number().int().min(1).max(100).default(50),
-});
-
-const presetListQuerySchema = z.object({
-  subject: z.string().trim().min(1).optional(),
-  limit: z.coerce.number().int().min(1).max(100).default(50),
-});
-
-const ingestJobListQuerySchema = z.object({
-  learningId: z.string().uuid().optional(),
-  limit: z.coerce.number().int().min(1).max(100).default(50),
-});
-
-const libraryEntryListQuerySchema = z.object({
-  learningId: z.string().uuid().optional(),
-  limit: z.coerce.number().int().min(1).max(100).default(50),
-});
-
-const toolCallSchema = z.object({
-  tool: z.enum([
-    "search_learnings",
-    "create_learning_from_chat",
-    "generate_questions",
-    "save_content",
-  ]),
-  params: z.record(z.string(), z.unknown()).optional(),
-});
-
-const upsertLearningSchema = schemas.learning
-  .pick({
-    id: true,
-    title: true,
-    subject: true,
-    tags: true,
-    progress: true,
-    createdAt: true,
-    updatedAt: true,
-  })
-  .partial({ id: true, progress: true, subject: true, tags: true, createdAt: true, updatedAt: true })
-  .extend({
-    title: z.string().min(1),
-  });
-
-const updateLearningSchema = upsertLearningSchema.partial().refine(
-  (data) => Object.keys(data).length > 0,
-  { message: "at least one field is required" },
-);
-
-const upsertMaterialSchema = schemas.material
-  .pick({
-    id: true,
-    learningId: true,
-    type: true,
-    sourcePath: true,
-    rawContent: true,
-    metadata: true,
-    createdAt: true,
-    updatedAt: true,
-  })
-  .partial({ id: true, sourcePath: true, rawContent: true, metadata: true, createdAt: true, updatedAt: true })
-  .extend({
-    learningId: z.string().uuid(),
-    type: schemas.material.shape.type,
-  });
-
-const updateMaterialSchema = upsertMaterialSchema
-  .omit({ learningId: true })
-  .partial()
-  .refine((value) => Object.keys(value).length > 0, {
-    message: "at least one field is required",
-  });
-
-const ingestMaterialRequestSchema = ingestRequestSchema.extend({
-  learningId: z.string().uuid(),
-});
-
-const upsertGeneratedSchema = schemas.generatedContent
-  .pick({
-    id: true,
-    learningId: true,
-    materialId: true,
-    type: true,
-    content: true,
-    promptPreset: true,
-    createdAt: true,
-  })
-  .partial({ id: true, materialId: true, promptPreset: true, createdAt: true })
-  .extend({
-    learningId: z.string().uuid(),
-    type: schemas.generatedContent.shape.type,
-    content: z.record(z.string(), z.unknown()),
-  });
-
-const upsertSessionSchema = schemas.practiceSession
-  .pick({
-    id: true,
-    learningId: true,
-    generatedContentId: true,
-    questionRef: true,
-    answerText: true,
-    isCorrect: true,
-    feedback: true,
-    score: true,
-    createdAt: true,
-  })
-  .partial({
-    id: true,
-    generatedContentId: true,
-    isCorrect: true,
-    feedback: true,
-    score: true,
-    questionRef: true,
-    createdAt: true,
-  })
-  .extend({
-    learningId: z.string().uuid(),
-    answerText: z.string().min(1),
-  });
-
-const upsertPresetSchema = schemas.preset
-  .pick({
-    id: true,
-    subject: true,
-    title: true,
-    systemPrompt: true,
-    userInstructionTemplate: true,
-    createdAt: true,
-    updatedAt: true,
-  })
-  .partial({ id: true, createdAt: true, updatedAt: true })
-  .extend({
-    subject: z.string().min(1),
-    title: z.string().min(1),
-    systemPrompt: z.string().min(1),
-    userInstructionTemplate: z.string().min(1),
-  });
-
-const updatePresetSchema = upsertPresetSchema
-  .omit({ id: true })
-  .partial()
-  .refine((data) => Object.keys(data).length > 0, {
-    message: "at least one field is required",
-  });
-
-interface AppBindings {
-  DB: D1Database;
-  MATERIALS_BUCKET?: R2Bucket;
-  MATERIALS_KV?: KVNamespace;
-  OPENAI_API_KEY?: string;
-  OPENAI_API_BASE_URL?: string;
-  OPENAI_MODEL?: string;
-  OPENAI_EMBED_MODEL?: string;
-  OPENAI_EMBEDDING_MODEL?: string;
-  OPENAI_TRANSCRIPTION_MODEL?: string;
-  OPENAI_VISION_MODEL?: string;
-}
-
-interface AppEnv {
-  Bindings: AppBindings;
-}
+import { ToolCallError } from "./core/errors";
+import type { AuthContext } from "./core/auth";
+import { DEFAULT_USER_ID, fallbackUserContext, publicPaths, resolveAuthContext } from "./core/auth";
+import {
+  ensureCoreTables,
+  getPrismaClient,
+  nowIso,
+} from "./core/prisma";
+import {
+  embedRequestSchema,
+  ingestJobListQuerySchema,
+  ingestMaterialRequestSchema,
+  learningListQuerySchema,
+  libraryEntryListQuerySchema,
+  presetListQuerySchema,
+  proxyRequestSchema,
+  semanticSearchRequestSchema,
+  toolCallSchema,
+  updateLearningSchema,
+  updateMaterialSchema,
+  updatePresetSchema,
+  upsertGeneratedSchema,
+  upsertLearningSchema,
+  upsertMaterialSchema,
+  upsertPresetSchema,
+  upsertSessionSchema,
+} from "./core/schemas";
+import { fetchIngestJob, fetchLibraryAsset, fetchLibraryEntryById, saveIngestJob } from "./core/library";
+import type { AppBindings, AppEnv } from "./core/types";
+import type { D1Database } from "@cloudflare/workers-types";
 
 export const app = new Hono<AppEnv>();
-
-const nowIso = () => new Date().toISOString();
-let materialTablesReady: Promise<void> | null = null;
-let prismaSchemaReady: Promise<void> | null = null;
-
-const DEFAULT_USER_ID = "00000000-0000-4000-8000-000000000000";
-const DEFAULT_USER_DISPLAY_NAME = "Demo User";
-const SESSION_TTL_DAYS = 90;
-const prismaClientCache = new WeakMap<D1Database, PrismaClient>();
-
-const getPrismaClient = (db: D1Database) => {
-  let client = prismaClientCache.get(db);
-  if (!client) {
-    const adapter = new D1Adapter(db);
-    client = new PrismaClient({ adapter });
-    prismaClientCache.set(db, client);
-  }
-  return client;
-};
-
-const ensureMaterialTables = (db?: D1Database) => {
-  if (!db) return Promise.resolve();
-  if (!materialTablesReady) {
-    materialTablesReady = (async () => {
-      await db
-        .prepare(
-          `CREATE TABLE IF NOT EXISTS MaterialLibraryEntry (
-            id TEXT PRIMARY KEY,
-            userId TEXT,
-            displayName TEXT NOT NULL,
-            storedPath TEXT NOT NULL,
-            assetPath TEXT,
-            libraryPath TEXT,
-            type TEXT NOT NULL,
-            bytes INTEGER,
-            learningId TEXT,
-            materialId TEXT,
-            originalSource TEXT,
-            notes TEXT,
-            createdAt TEXT NOT NULL,
-            updatedAt TEXT NOT NULL
-          )`,
-        )
-        .run();
-      await db.prepare("ALTER TABLE MaterialLibraryEntry ADD COLUMN userId TEXT").run().catch(() => {});
-      await db.prepare("ALTER TABLE MaterialLibraryEntry ADD COLUMN assetPath TEXT").run().catch(() => {});
-      await db
-        .prepare("CREATE INDEX IF NOT EXISTS idx_material_library_learning ON MaterialLibraryEntry(learningId)")
-        .run();
-      await db
-        .prepare(
-          `CREATE TABLE IF NOT EXISTS MaterialLibraryAsset (
-            entryId TEXT PRIMARY KEY,
-            userId TEXT,
-            mimeType TEXT NOT NULL,
-            size INTEGER NOT NULL,
-            data BLOB NOT NULL,
-            createdAt TEXT NOT NULL,
-            updatedAt TEXT NOT NULL,
-            FOREIGN KEY(entryId) REFERENCES MaterialLibraryEntry(id) ON DELETE CASCADE
-          )`,
-        )
-        .run();
-      await db.prepare("ALTER TABLE MaterialLibraryAsset ADD COLUMN userId TEXT").run().catch(() => {});
-      await db
-        .prepare(
-          `CREATE TABLE IF NOT EXISTS MaterialIngestJob (
-            id TEXT PRIMARY KEY,
-            learningId TEXT,
-            source TEXT NOT NULL,
-            status TEXT NOT NULL,
-            steps TEXT NOT NULL,
-            requestedAt TEXT NOT NULL,
-            updatedAt TEXT NOT NULL,
-            preferredOcrEngine TEXT,
-            preferredTranscriptionEngine TEXT,
-            notes TEXT,
-            outputMaterialId TEXT,
-            libraryPath TEXT,
-            userId TEXT
-          )`,
-        )
-        .run();
-      await db.prepare("ALTER TABLE MaterialIngestJob ADD COLUMN userId TEXT").run().catch(() => {});
-      await db
-        .prepare("CREATE INDEX IF NOT EXISTS idx_ingest_jobs_learning ON MaterialIngestJob(learningId)")
-        .run();
-      await db
-        .prepare("CREATE INDEX IF NOT EXISTS idx_ingest_jobs_updated ON MaterialIngestJob(updatedAt DESC)")
-        .run();
-    })();
-  }
-  return materialTablesReady;
-};
-
-const PRISMA_MIGRATIONS_TABLE = "_prisma_migrations";
-
-const runPrismaStatements = async (prisma: PrismaClient, sql: string) => {
-  const statements = sql
-    .split(/;\s*\n/)
-    .map((entry) => entry.trim())
-    .filter(Boolean);
-  for (const statement of statements) {
-    await prisma.$executeRawUnsafe(statement);
-  }
-};
-
-const ensurePrismaMigrationsTable = async (prisma: PrismaClient) => {
-  await prisma.$executeRawUnsafe(
-    `CREATE TABLE IF NOT EXISTS ${PRISMA_MIGRATIONS_TABLE} (
-      id TEXT PRIMARY KEY,
-      checksum TEXT NOT NULL,
-      finished_at TEXT,
-      migration_name TEXT NOT NULL,
-      logs TEXT,
-      rolled_back_at TEXT,
-      started_at TEXT,
-      applied_steps_count INTEGER NOT NULL DEFAULT 0
-    )`,
-  );
-  await prisma.$executeRawUnsafe(
-    `CREATE UNIQUE INDEX IF NOT EXISTS idx_prisma_migrations_name ON ${PRISMA_MIGRATIONS_TABLE}(migration_name)`,
-  );
-};
-
-const loadAppliedPrismaMigrations = async (prisma: PrismaClient) => {
-  await ensurePrismaMigrationsTable(prisma);
-  const rows = (await prisma.$queryRawUnsafe(
-    `SELECT migration_name FROM ${PRISMA_MIGRATIONS_TABLE}`,
-  )) as { migration_name?: string | null }[];
-  const applied = new Set<string>();
-  for (const row of rows ?? []) {
-    if (row?.migration_name) {
-      applied.add(row.migration_name);
-    }
-  }
-  return applied;
-};
-
-const hashString = async (value: string) => {
-  const data = new TextEncoder().encode(value);
-  if (typeof crypto?.subtle !== "undefined") {
-    const digest = await crypto.subtle.digest("SHA-256", data);
-    return toHexString(digest);
-  }
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { createHash } = await import("node:crypto");
-  return createHash("sha256").update(data).digest("hex");
-};
-
-const applyPrismaMigrations = async (prisma: PrismaClient) => {
-  await ensurePrismaMigrationsTable(prisma);
-  const applied = await loadAppliedPrismaMigrations(prisma);
-  for (const migration of prismaMigrations) {
-    if (applied.has(migration.name)) continue;
-    const startedAt = nowIso();
-    try {
-      await runPrismaStatements(prisma, migration.sql);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`failed_to_apply_migration:${migration.name}:${message}`);
-    }
-    await prisma.$executeRawUnsafe(
-      `INSERT INTO ${PRISMA_MIGRATIONS_TABLE}
-        (id, checksum, finished_at, migration_name, logs, rolled_back_at, started_at, applied_steps_count)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      crypto.randomUUID(),
-      await hashString(migration.sql),
-      nowIso(),
-      migration.name,
-      null,
-      null,
-      startedAt,
-      1,
-    );
-  }
-};
-
-const ensurePrismaSchema = (db?: D1Database) => {
-  if (!db) return Promise.resolve();
-  if (!prismaSchemaReady) {
-    const prisma = getPrismaClient(db);
-    prismaSchemaReady = applyPrismaMigrations(prisma).catch((error) => {
-      prismaSchemaReady = null;
-      throw error;
-    });
-  }
-  return prismaSchemaReady;
-};
-
-const ensureUserTables = (db?: D1Database) => ensurePrismaSchema(db);
-
-const ensureCoreTables = (db?: D1Database) => ensurePrismaSchema(db);
-
-const toHexString = (buffer: ArrayBuffer) =>
-  Array.from(new Uint8Array(buffer))
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
-
-const hashToken = async (token: string) => {
-  const data = new TextEncoder().encode(token);
-  if (typeof crypto?.subtle !== "undefined") {
-    const digest = await crypto.subtle.digest("SHA-256", data);
-    return toHexString(digest);
-  }
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { createHash } = await import("node:crypto");
-  return createHash("sha256").update(data).digest("hex");
-};
-
-const generateSessionToken = () =>
-  `tt_${crypto.randomUUID().replace(/-/g, "")}${crypto.randomUUID().replace(/-/g, "")}`;
-
-const extractBearerToken = (req: Request) => {
-  const auth = req.headers.get("authorization") ?? req.headers.get("Authorization");
-  if (auth && auth.toLowerCase().startsWith("bearer ")) {
-    return auth.slice(7).trim();
-  }
-  const headerToken = req.headers.get("x-session-token") ?? req.headers.get("x-api-token");
-  return headerToken?.trim() || null;
-};
-
-const fetchUserById = async (db: D1Database, id: string) => {
-  const prisma = getPrismaClient(db);
-  const row = await prisma.user.findUnique({ where: { id } });
-  return row ? mapUser(row as unknown as UserRow) : null;
-};
-
-const fetchUserByEmail = async (db: D1Database, email: string) => {
-  const prisma = getPrismaClient(db);
-  const row = await prisma.user.findUnique({ where: { email } });
-  return row ? mapUser(row as unknown as UserRow) : null;
-};
-
-const ensureDefaultUser = async (db: D1Database) => {
-  await ensureUserTables(db);
-  const prisma = getPrismaClient(db);
-  const user = await prisma.user.upsert({
-    where: { id: DEFAULT_USER_ID },
-    update: {},
-    create: { id: DEFAULT_USER_ID, displayName: DEFAULT_USER_DISPLAY_NAME },
-  });
-  return mapUser(user as unknown as UserRow);
-};
-
-const createUser = async (db: D1Database, data: { email?: string; displayName?: string }) => {
-  await ensureUserTables(db);
-  const prisma = getPrismaClient(db);
-  const created = await prisma.user.create({
-    data: {
-      id: crypto.randomUUID(),
-      email: data.email,
-      displayName: data.displayName,
-    },
-  });
-  return mapUser(created as unknown as UserRow);
-};
-
-const updateUserProfile = async (
-  db: D1Database,
-  userId: string,
-  data: { email?: string; displayName?: string },
-): Promise<User> => {
-  await ensureUserTables(db);
-  const current = await fetchUserById(db, userId);
-  if (!current) {
-    throw new ToolCallError("user_not_found", "User not found", 404);
-  }
-  if (data.email) {
-    const existing = await fetchUserByEmail(db, data.email);
-    if (existing && existing.id !== userId) {
-      throw new ToolCallError("email_conflict", "Email is already in use", 409);
-    }
-  }
-  const updatedAt = nowIso();
-  await db
-    .prepare(
-      `UPDATE User SET
-        email = COALESCE(?, email),
-        displayName = COALESCE(?, displayName),
-        updatedAt = ?
-       WHERE id = ?`,
-    )
-    .bind(data.email ?? current.email ?? null, data.displayName ?? current.displayName ?? null, updatedAt, userId)
-    .run();
-  const updated = await fetchUserById(db, userId);
-  if (!updated) throw new ToolCallError("user_not_found", "User not found after update", 404);
-  return updated;
-};
-
-const createSession = async (
-  db: D1Database,
-  userId: string,
-  deviceName?: string,
-): Promise<{ session: UserSession; token: string }> => {
-  const token = generateSessionToken();
-  const tokenHash = await hashToken(token);
-  const expires = new Date();
-  expires.setDate(expires.getDate() + SESSION_TTL_DAYS);
-  const prisma = getPrismaClient(db);
-  const sessionRow = await prisma.userSession.create({
-    data: {
-      id: crypto.randomUUID(),
-      userId,
-      tokenHash,
-      deviceName,
-      expiresAt: expires.toISOString(),
-    },
-  });
-  return { session: mapUserSession(sessionRow as unknown as UserSessionRow), token };
-};
-
-type AuthContext = {
-  user: User;
-  session?: UserSession;
-  token?: string;
-};
-
-const resolveAuthContext = async (
-  db: D1Database,
-  req: Request,
-  allowAnonymous = true,
-): Promise<AuthContext> => {
-  const token = extractBearerToken(req);
-  await ensureUserTables(db);
-  const prisma = getPrismaClient(db);
-
-  if (!token) {
-    if (!allowAnonymous) {
-      throw new ToolCallError("unauthorized", "Session token is required", 401);
-    }
-    const user = await ensureDefaultUser(db);
-    return { user };
-  }
-
-  const tokenHash = await hashToken(token);
-  const sessionRow = await prisma.userSession.findUnique({ where: { tokenHash } });
-  if (!sessionRow) {
-    throw new ToolCallError("unauthorized", "Invalid session token", 401);
-  }
-  if (sessionRow.expiresAt && new Date(sessionRow.expiresAt as unknown as string).getTime() < Date.now()) {
-    throw new ToolCallError("session_expired", "Session has expired", 401);
-  }
-
-  const userRow = await prisma.user.findUnique({ where: { id: sessionRow.userId } });
-  if (!userRow) {
-    throw new ToolCallError("unauthorized", "User not found", 401);
-  }
-  const now = nowIso();
-  await prisma.userSession.update({
-    where: { id: sessionRow.id },
-    data: { lastSeenAt: now, updatedAt: now },
-  });
-  await prisma.user.update({
-    where: { id: sessionRow.userId },
-    data: { lastSeenAt: now, updatedAt: now },
-  });
-  return {
-    user: mapUser(userRow as unknown as UserRow),
-    session: mapUserSession(sessionRow as unknown as UserSessionRow),
-    token,
-  };
-};
 
 declare module "hono" {
   interface ContextVariableMap {
     auth?: AuthContext;
   }
 }
-
-const fallbackUserContext = (): AuthContext => ({
-  user: {
-    id: DEFAULT_USER_ID,
-    displayName: DEFAULT_USER_DISPLAY_NAME,
-    createdAt: nowIso(),
-    updatedAt: nowIso(),
-  },
-});
-
-const publicPaths = new Set<string>(["/health", "/api/auth/anonymous"]);
 
 app.use("*", async (c, next) => {
   const path = new URL(c.req.url).pathname;
@@ -652,24 +107,6 @@ app.use("*", async (c, next) => {
     return c.json({ error: "unauthorized", message }, status);
   }
 });
-
-const requireAuth = (c: Context<AppEnv>) => {
-  const auth = c.get("auth") as AuthContext | undefined;
-  if (!auth) {
-    throw new ToolCallError("unauthorized", "Session is required", 401);
-  }
-  return auth;
-};
-class ToolCallError extends Error {
-  status: number;
-  code: string;
-
-  constructor(code: string, message: string, status = 400) {
-    super(message);
-    this.code = code;
-    this.status = status;
-  }
-}
 
 const mapLearning = (row: LearningWithStatsRow): Learning & {
   materialsCount: number;
@@ -721,53 +158,12 @@ const mapMaterial = (row: MaterialRow): Material => ({
   updatedAt: typeof row.updatedAt === "string" ? row.updatedAt : row.updatedAt.toISOString(),
 });
 
-const saveLibraryEntry = async (
-  db: D1Database,
-  entry: MaterialLibraryEntry,
-  userId: string = DEFAULT_USER_ID,
-): Promise<MaterialLibraryEntry> => {
-  await ensureMaterialTables(db);
-  await db
-    .prepare(
-      `INSERT OR REPLACE INTO MaterialLibraryEntry
-        (id, userId, displayName, storedPath, assetPath, libraryPath, type, bytes, learningId, materialId, originalSource, notes, createdAt, updatedAt)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .bind(
-      entry.id,
-      entry.userId ?? userId,
-      entry.displayName,
-      entry.storedPath,
-      entry.assetPath ?? null,
-      entry.libraryPath ?? null,
-      entry.type,
-      entry.bytes ?? null,
-      entry.learningId ?? null,
-      entry.materialId ?? null,
-      toJson(entry.originalSource),
-      entry.notes ?? null,
-      entry.createdAt,
-      entry.updatedAt,
-    )
-    .run();
-  const row = await db
-    .prepare("SELECT * FROM MaterialLibraryEntry WHERE id = ? AND (userId IS NULL OR userId = ?) LIMIT 1")
-    .bind(entry.id, entry.userId ?? userId)
-    .first<LibraryEntryRow>();
-  return row ? mapLibraryEntry(row) : entry;
-};
-
-const toArrayBuffer = (bytes: Uint8Array) =>
-  bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
-    ? bytes.buffer
-    : bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-
-type LibraryAssetPayload = {
+interface LibraryAssetPayload {
   bytes: Uint8Array;
   mimeType: string;
   size: number;
   fileName?: string;
-};
+}
 
 const buildLibraryAssetPayload = (
   payload?: MaterialIngestRequest["payload"],
@@ -793,226 +189,6 @@ const buildLibraryAssetPayload = (
     };
   }
   return null;
-};
-
-const sanitizeStorageFileName = (value?: string, fallback = "asset.bin") => {
-  if (!value) return fallback;
-  const normalized = value.replace(/[^\w.\-]+/g, "_").replace(/^_+/, "");
-  return normalized.length ? normalized.slice(0, 120) : fallback;
-};
-
-const buildLibraryAssetKey = (entryId: string, fileName?: string) =>
-  `materials/${entryId}/${sanitizeStorageFileName(fileName ?? `${entryId}.bin`)}`;
-
-const libraryAssetKvKey = (entryId: string) => `library-asset:${entryId}`;
-
-const fetchLegacyLibraryAsset = async (db: D1Database | undefined, entryId: string) => {
-  if (!db) return null;
-  await ensureMaterialTables(db);
-  const row = await db
-    .prepare("SELECT entryId, mimeType, size, data FROM MaterialLibraryAsset WHERE entryId = ? LIMIT 1")
-    .bind(entryId)
-    .first<{ entryId: string; mimeType: string; size: number; data?: ArrayBuffer | null }>();
-  if (!row?.data) return null;
-  return {
-    entryId: row.entryId,
-    key: `legacy/${row.entryId}`,
-    mimeType: row.mimeType,
-    size: row.size,
-    data: row.data,
-  };
-};
-
-const putLibraryAssetIndex = async (
-  env: AppBindings,
-  entryId: string,
-  record: { key: string; size: number; mimeType: string; fileName?: string },
-) => {
-  if (!env.MATERIALS_KV) return;
-  await env.MATERIALS_KV.put(libraryAssetKvKey(entryId), JSON.stringify(record), {
-    metadata: { entryId },
-  });
-};
-
-const saveLibraryAsset = async (
-  env: AppBindings,
-  entryId: string,
-  asset: LibraryAssetPayload,
-): Promise<{ key: string; publicPath: string }> => {
-  if (!env.MATERIALS_BUCKET) {
-    throw new Error("MATERIALS_BUCKET binding is required to store materials in R2");
-  }
-  const key = buildLibraryAssetKey(entryId, asset.fileName);
-  await env.MATERIALS_BUCKET.put(key, toArrayBuffer(asset.bytes), {
-    httpMetadata: { contentType: asset.mimeType },
-    customMetadata: { entryId },
-  });
-  await putLibraryAssetIndex(env, entryId, {
-    key,
-    size: asset.size,
-    mimeType: asset.mimeType,
-    fileName: asset.fileName,
-  });
-  return { key, publicPath: `/api/materials/library/${entryId}/content` };
-};
-
-const fetchLibraryAsset = async (env: AppBindings, entry: MaterialLibraryEntry) => {
-  if (!env.MATERIALS_BUCKET) {
-    return fetchLegacyLibraryAsset(env.DB, entry.id);
-  }
-  const kvRecord = ((await env.MATERIALS_KV?.get(libraryAssetKvKey(entry.id), "json").catch(() => null)) ||
-    null) as { key?: string; mimeType?: string; size?: number } | null;
-  const key = kvRecord?.key ?? entry.storedPath ?? entry.libraryPath;
-  if (!key) return null;
-  const object = await env.MATERIALS_BUCKET.get(key);
-  if (!object) return fetchLegacyLibraryAsset(env.DB, entry.id);
-  const data = await object.arrayBuffer();
-  return {
-    entryId: entry.id,
-    key,
-    mimeType: object.httpMetadata?.contentType ?? kvRecord?.mimeType ?? "application/octet-stream",
-    size: kvRecord?.size ?? data.byteLength,
-    data,
-  };
-};
-
-const sanitizeFileNameForHeader = (value: string, fallback = "material") => {
-  const normalized = value.replace(/[^\w.\- ]+/g, "_").trim();
-  if (normalized.length > 0) return normalized.slice(0, 120);
-  return fallback;
-};
-
-const deleteLibraryAssetsForMaterial = async (env: AppBindings, materialId: string) => {
-  const bucket = env.MATERIALS_BUCKET;
-  await ensureMaterialTables(env.DB);
-  const rows = await env.DB
-    .prepare("SELECT id, storedPath FROM MaterialLibraryEntry WHERE materialId = ?")
-    .bind(materialId)
-    .all<{ id: string; storedPath?: string | null }>();
-  const entries = rows.results ?? [];
-  await Promise.all(
-    entries.map(async (row) => {
-      const kvKey = ((await env.MATERIALS_KV?.get(libraryAssetKvKey(row.id), "json").catch(() => null)) ||
-        null) as { key?: string } | null;
-      const key = kvKey?.key ?? row.storedPath ?? undefined;
-      if (bucket && key) {
-        await bucket.delete(key).catch(() => {});
-      }
-      await env.MATERIALS_KV?.delete(libraryAssetKvKey(row.id)).catch(() => {});
-    }),
-  );
-  try {
-    await env.DB.prepare(
-      "DELETE FROM MaterialLibraryAsset WHERE entryId IN (SELECT id FROM MaterialLibraryEntry WHERE materialId = ?)",
-    )
-      .bind(materialId)
-      .run();
-  } catch {
-    // legacy table may not exist in fresh environments
-  }
-};
-
-const saveIngestJob = async (
-  db: D1Database,
-  job: IngestJob,
-  userId: string = DEFAULT_USER_ID,
-): Promise<IngestJob> => {
-  await ensureMaterialTables(db);
-  await db
-    .prepare(
-      `INSERT OR REPLACE INTO MaterialIngestJob
-        (id, learningId, source, status, steps, requestedAt, updatedAt,
-          preferredOcrEngine, preferredTranscriptionEngine, notes, outputMaterialId, libraryPath, userId)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .bind(
-      job.id,
-      job.learningId ?? null,
-      toJson(job.source),
-      job.status,
-      toJson(job.steps),
-      job.requestedAt,
-      job.updatedAt,
-      job.preferredOcrEngine ?? null,
-      job.preferredTranscriptionEngine ?? null,
-      job.notes ?? null,
-      job.outputMaterialId ?? null,
-      job.libraryPath ?? null,
-      userId,
-    )
-    .run();
-  const row = await db
-    .prepare("SELECT * FROM MaterialIngestJob WHERE id = ? AND (userId IS NULL OR userId = ?) LIMIT 1")
-    .bind(job.id, userId)
-    .first<IngestJobRow>();
-  return row ? mapIngestJob(row) : job;
-};
-
-const fetchIngestJob = async (
-  db: D1Database,
-  id: string,
-  userId: string = DEFAULT_USER_ID,
-): Promise<IngestJob | null> => {
-  await ensureMaterialTables(db);
-  const row = await db
-    .prepare("SELECT * FROM MaterialIngestJob WHERE id = ? AND (userId IS NULL OR userId = ?) LIMIT 1")
-    .bind(id, userId)
-    .first<IngestJobRow>();
-  return row ? mapIngestJob(row) : null;
-};
-
-const listIngestJobs = async (
-  db?: D1Database,
-  learningId?: string,
-  limit = 50,
-  userId: string = DEFAULT_USER_ID,
-) => {
-  if (!db) return [];
-  await ensureMaterialTables(db);
-  let sql = "SELECT * FROM MaterialIngestJob WHERE (userId IS NULL OR userId = ?)";
-  const binds: unknown[] = [userId];
-  if (learningId) {
-    sql += " AND learningId = ?";
-    binds.push(learningId);
-  }
-  sql += " ORDER BY updatedAt DESC LIMIT ?";
-  binds.push(limit);
-  const rows = await db.prepare(sql).bind(...binds).all<IngestJobRow>();
-  return rows.results?.map(mapIngestJob) ?? [];
-};
-
-const listLibraryEntries = async (
-  db?: D1Database,
-  learningId?: string,
-  limit = 50,
-  userId: string = DEFAULT_USER_ID,
-) => {
-  if (!db) return [];
-  await ensureMaterialTables(db);
-  let sql = "SELECT * FROM MaterialLibraryEntry WHERE (userId IS NULL OR userId = ?)";
-  const binds: unknown[] = [userId];
-  if (learningId) {
-    sql += " AND learningId = ?";
-    binds.push(learningId);
-  }
-  sql += " ORDER BY updatedAt DESC LIMIT ?";
-  binds.push(limit);
-  const rows = await db.prepare(sql).bind(...binds).all<LibraryEntryRow>();
-  return rows.results?.map(mapLibraryEntry) ?? [];
-};
-
-const fetchLibraryEntryById = async (
-  db?: D1Database,
-  id?: string,
-  userId: string = DEFAULT_USER_ID,
-) => {
-  if (!db || !id) return null;
-  await ensureMaterialTables(db);
-  const row = await db
-    .prepare("SELECT * FROM MaterialLibraryEntry WHERE id = ? AND (userId IS NULL OR userId = ?) LIMIT 1")
-    .bind(id, userId)
-    .first<LibraryEntryRow>();
-  return row ? mapLibraryEntry(row) : null;
 };
 
 const mapGeneratedContent = (row: GeneratedContentRow): GeneratedContent => ({
@@ -1384,11 +560,11 @@ const attachEmbeddingsToChunks = async (
   };
 };
 
-type Deferred<T> = {
+interface Deferred<T> {
   promise: Promise<T>;
   resolve: (value: T) => void;
   reject: (reason?: unknown) => void;
-};
+}
 
 const createDeferred = <T>(): Deferred<T> => {
   let resolve!: (value: T) => void;
@@ -1400,16 +576,16 @@ const createDeferred = <T>(): Deferred<T> => {
   return { promise, resolve, reject };
 };
 
-type IngestQueueItem = {
+interface IngestQueueItem {
   db: D1Database;
   jobId: string;
   materialId: string;
   learningId?: string;
   text?: string | null;
   env?: AppBindings;
-};
+}
 
-const ingestQueue: Array<IngestQueueItem & { deferred: Deferred<void> }> = [];
+const ingestQueue: (IngestQueueItem & { deferred: Deferred<void> })[] = [];
 let ingestQueueRunning = false;
 
 const persistChunkMetadata = async (
@@ -1419,7 +595,10 @@ const persistChunkMetadata = async (
   chunks: MaterialChunkRecord[],
 ) => {
   const totalTokens = chunks.reduce((sum, chunk) => sum + chunk.tokens, 0);
-  const chunkSummaries = chunks.map(({ embedding, ...rest }) => rest);
+  const chunkSummaries = chunks.map(({ embedding, ...rest }) => {
+    void embedding;
+    return rest;
+  });
   const now = nowIso();
   await applyMaterialMetadataPatch(db, materialId, (metadata = {}) => ({
     ...metadata,
@@ -1988,7 +1167,7 @@ const visionOcrWithOpenAi = async (env: AppBindings | undefined, dataUrl: string
   return { text: content, model };
 };
 
-type PdfJsLib = typeof import("pdfjs-dist/legacy/build/pdf.mjs");
+type PdfJsLib = typeof PdfJs;
 let pdfjsLibPromise: Promise<PdfJsLib> | null = null;
 
 const loadPdfjs = async (): Promise<PdfJsLib> => {
@@ -1998,7 +1177,7 @@ const loadPdfjs = async (): Promise<PdfJsLib> => {
       if (mod.GlobalWorkerOptions) {
         mod.GlobalWorkerOptions.workerSrc = undefined;
       }
-      return mod;
+      return mod as PdfJsLib;
     });
   }
   return pdfjsLibPromise;
@@ -2542,7 +1721,7 @@ const sanitizeLabel = (text: string, limit = 48) =>
     .trim();
 
 const cleanMaterialText = (value?: string) =>
-  typeof value === "string" ? value.replace(/\u0000/g, " ").trim() : "";
+  typeof value === "string" ? value.replaceAll("\u0000", " ").trim() : "";
 
 const createAdhocMaterialFromText = async (
   db: D1Database,
@@ -3789,8 +2968,11 @@ const generatedLabelMap: Record<GeneratedContent["type"], string> = {
 
 const SEMANTIC_NODE_LIMIT = 600;
 
-const encodeEmbedding = (vector: number[]): string =>
-  JSON.stringify(vector.map((value) => Number(value.toFixed(6))));
+const encodeEmbedding = (vector: number[]): Uint8Array => {
+  const rounded = vector.map((value) => Number(value.toFixed(6)));
+  const view = new Float32Array(rounded);
+  return new Uint8Array(view.buffer.slice(0));
+};
 
 const decodeEmbeddingValue = (raw: unknown): number[] | undefined => {
   if (!raw) return undefined;
@@ -3878,25 +3060,32 @@ const persistSemanticNode = async (
 ) => {
   if (!db) return;
   const id = draft.id ?? semanticNodeId(draft.refType, draft.refId);
-  await db
-    .prepare(
-      `INSERT OR REPLACE INTO SemanticNode (id, userId, refType, refId, embedding, metadata)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-    )
-    .bind(
+  await ensureCoreTables(db);
+  const prisma = getPrismaClient(db);
+  const metadata = {
+    ...(draft.metadata ?? {}),
+    label: draft.label,
+    excerpt: draft.excerpt,
+    subject: draft.subject ?? null,
+  };
+  await prisma.semanticNode.upsert({
+    where: { id },
+    create: {
       id,
-      draft.userId,
-      draft.refType,
-      draft.refId,
-      encodeEmbedding(draft.embedding),
-      toJson({
-        ...(draft.metadata ?? {}),
-        label: draft.label,
-        excerpt: draft.excerpt,
-        subject: draft.subject ?? null,
-      }),
-    )
-    .run();
+      userId: draft.userId,
+      refType: draft.refType,
+      refId: draft.refId,
+      embedding: encodeEmbedding(draft.embedding),
+      metadata: metadata as unknown as Prisma.JsonValue,
+    },
+    update: {
+      userId: draft.userId,
+      refType: draft.refType,
+      refId: draft.refId,
+      embedding: encodeEmbedding(draft.embedding),
+      metadata: metadata as unknown as Prisma.JsonValue,
+    },
+  });
 };
 
 const persistSemanticNodes = async (db: D1Database | undefined, drafts: SemanticNodeDraft[]) => {
@@ -3914,12 +3103,15 @@ const deleteSemanticNodesByRef = async (
 ) => {
   if (!db || refIds.length === 0) return;
   const uniqueIds = Array.from(new Set(refIds));
-  const placeholders = uniqueIds.map(() => "?").join(", ");
-  const sql = userId
-    ? `DELETE FROM SemanticNode WHERE refType = ? AND userId = ? AND refId IN (${placeholders})`
-    : `DELETE FROM SemanticNode WHERE refType = ? AND refId IN (${placeholders})`;
-  const binds = userId ? [refType, userId, ...uniqueIds] : [refType, ...uniqueIds];
-  await db.prepare(sql).bind(...binds).run();
+  await ensureCoreTables(db);
+  const prisma = getPrismaClient(db);
+  await prisma.semanticNode.deleteMany({
+    where: {
+      refType,
+      refId: { in: uniqueIds },
+      ...(userId ? { userId } : {}),
+    },
+  });
 };
 
 const FALLBACK_EMBEDDING_DIMENSION = 12;
@@ -3927,12 +3119,12 @@ const DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small";
 
 type EmbeddingProvider = "openai" | "fallback";
 
-type EmbeddingBatchResult = {
+interface EmbeddingBatchResult {
   embeddings: number[][];
   dimension: number;
   model?: string;
   provider: EmbeddingProvider;
-};
+}
 
 const toEmbedding = (text: string, dimension = FALLBACK_EMBEDDING_DIMENSION): number[] => {
   const vec = Array.from({ length: dimension }, () => 0);
@@ -4086,18 +3278,15 @@ const loadSemanticNodesFromDb = async (
   db: D1Database,
   userId: string,
 ): Promise<(SemanticNodeWithMeta & { embedding: number[] })[]> => {
-  const rows = await db
-    .prepare(
-      "SELECT id, userId, refType, refId, embedding, metadata FROM SemanticNode WHERE userId = ? ORDER BY rowid DESC LIMIT ?",
-    )
-    .bind(userId, SEMANTIC_NODE_LIMIT)
-    .all<SemanticNodeRow>();
-  return (
-    rows.results
-      ?.map((row) => mapSemanticRowToNode(row))
-      .filter((node): node is SemanticNodeWithMeta & { embedding: number[] } => Boolean(node)) ??
-    []
-  );
+  const prisma = getPrismaClient(db);
+  const rows = await prisma.semanticNode.findMany({
+    where: { userId },
+    orderBy: { id: "desc" },
+    take: SEMANTIC_NODE_LIMIT,
+  });
+  return rows
+    .map((row) => mapSemanticRowToNode(row as unknown as SemanticNodeRow))
+    .filter((node): node is SemanticNodeWithMeta & { embedding: number[] } => Boolean(node));
 };
 
 const buildLearningEmbeddingBasis = (
@@ -5009,6 +4198,33 @@ const executeToolCall = async (
 };
 
 export {
+  createSession,
+  createUser,
+  ensureDefaultUser,
+  fetchUserByEmail,
+  generateSessionToken,
+  hashToken,
+  requireAuth,
+  resolveAuthContext,
+  updateUserProfile,
+  DEFAULT_USER_DISPLAY_NAME,
+} from "./core/auth";
+
+export { ensureMaterialTables, ensurePrismaSchema, ensureUserTables } from "./core/prisma";
+export {
+  deleteLibraryAssetsForMaterial,
+  fetchIngestJob,
+  fetchLibraryAsset,
+  fetchLibraryEntryById,
+  listIngestJobs,
+  listLibraryEntries,
+  saveIngestJob,
+  saveLibraryAsset,
+  saveLibraryEntry,
+  sanitizeFileNameForHeader,
+} from "./core/library";
+
+export {
   app,
   attachEmbeddingsToChunks,
   authSessionResponseSchema,
@@ -5027,21 +4243,13 @@ export {
   calculateLearningProgress,
   chunkMaterialText,
   cloneIngestJob,
-  createSession,
-  createUser,
   DEFAULT_GENERATION_TEMPERATURE,
-  DEFAULT_USER_DISPLAY_NAME,
   DEFAULT_USER_ID,
-  deleteLibraryAssetsForMaterial,
   deleteSemanticNodesByRef,
   determineGenerationTypes,
   embedRequestSchema,
   enqueueIngestJobProcessing,
   ensureCoreTables,
-  ensureDefaultUser,
-  ensureMaterialTables,
-  ensurePrismaSchema,
-  ensureUserTables,
   executeToolCall,
   fetchIngestJob,
   fetchLearning,
@@ -5049,14 +4257,11 @@ export {
   fetchLibraryEntryById,
   fetchMaterial,
   fetchPreset,
-  fetchUserByEmail,
   generateContentsFromMaterial,
   generateEmbeddings,
   generateFromMaterialRequestSchema,
-  generateSessionToken,
   getPrismaClient,
   gradeWithOpenAi,
-  hashToken,
   ingestJobListQuerySchema,
   ingestMaterialRequestSchema,
   insertLearning,
@@ -5064,9 +4269,7 @@ export {
   issueSessionRequestSchema,
   learningListQuerySchema,
   libraryEntryListQuerySchema,
-  listIngestJobs,
   listLearnings,
-  listLibraryEntries,
   mapGeneratedContent,
   mapLearning,
   mapMaterial,
@@ -5079,16 +4282,11 @@ export {
   PREPROCESS_STEP_KINDS,
   practiceGradingRequestSchema,
   proxyRequestSchema,
-  requireAuth,
-  resolveAuthContext,
   resolveMaterialForGeneration,
   resolveOpenAiBaseUrl,
   resolvePresetContext,
-  sanitizeFileNameForHeader,
   saveGeneratedContent,
   saveIngestJob,
-  saveLibraryAsset,
-  saveLibraryEntry,
   searchSemantic,
   semanticSearchRequestSchema,
   serializeMatchesForClient,
@@ -5101,7 +4299,6 @@ export {
   updateLearningProgress,
   updateMaterialSchema,
   updatePresetSchema,
-  updateUserProfile,
   updateUserProfileRequestSchema,
   upsertGeneratedSchema,
   upsertLearningSchema,

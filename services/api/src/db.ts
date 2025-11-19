@@ -75,12 +75,13 @@ export type LearningWithStatsRow = LearningRow & {
 
 export interface IngestJobRow {
   id: string;
+  userId?: string | null;
   learningId?: string | null;
-  source: string;
+  source: string | unknown;
   status: string;
-  steps: string;
-  requestedAt: string;
-  updatedAt: string;
+  steps: string | unknown;
+  requestedAt: string | Date;
+  updatedAt: string | Date;
   preferredOcrEngine?: string | null;
   preferredTranscriptionEngine?: string | null;
   notes?: string | null;
@@ -99,10 +100,10 @@ export interface LibraryEntryRow {
   bytes?: number | null;
   learningId?: string | null;
   materialId?: string | null;
-  originalSource?: string | null;
+  originalSource?: string | null | unknown;
   notes?: string | null;
-  createdAt: string;
-  updatedAt: string;
+  createdAt: string | Date;
+  updatedAt: string | Date;
 }
 
 export interface SemanticNodeRow {
@@ -143,20 +144,34 @@ export const parseJson = <T = JsonValue>(value?: string | null): T | undefined =
   }
 };
 
-export const mapIngestJob = (row: IngestJobRow): IngestJob => ({
-  id: row.id,
-  learningId: row.learningId ?? undefined,
-  status: row.status as IngestJob["status"],
-  source: parseJson(row.source)!,
-  steps: parseJson(row.steps) ?? [],
-  preferredOcrEngine: (row.preferredOcrEngine as IngestJob["preferredOcrEngine"]) ?? undefined,
-  preferredTranscriptionEngine: (row.preferredTranscriptionEngine as IngestJob["preferredTranscriptionEngine"]) ?? undefined,
-  requestedAt: row.requestedAt,
-  updatedAt: row.updatedAt,
-  notes: row.notes ?? undefined,
-  outputMaterialId: row.outputMaterialId ?? undefined,
-  libraryPath: row.libraryPath ?? undefined,
-});
+const toMaybeJson = <T = JsonValue>(value?: string | JsonValue | null): T | undefined => {
+  if (value === null || value === undefined) return undefined;
+  if (typeof value === "string") return parseJson<T>(value);
+  return value as T;
+};
+
+const toIsoString = (value: string | Date) =>
+  typeof value === "string" ? value : value.toISOString();
+
+export const mapIngestJob = (row: IngestJobRow): IngestJob => {
+  const source = toMaybeJson<IngestJob["source"]>(row.source as string | JsonValue | null);
+  const steps = toMaybeJson<IngestJob["steps"]>(row.steps as string | JsonValue | null);
+  return {
+    id: row.id,
+    userId: row.userId ?? undefined,
+    learningId: row.learningId ?? undefined,
+    status: row.status as IngestJob["status"],
+    source: source ?? { kind: "text", text: "" },
+    steps: Array.isArray(steps) ? steps : [],
+    preferredOcrEngine: (row.preferredOcrEngine as IngestJob["preferredOcrEngine"]) ?? undefined,
+    preferredTranscriptionEngine: (row.preferredTranscriptionEngine as IngestJob["preferredTranscriptionEngine"]) ?? undefined,
+    requestedAt: toIsoString(row.requestedAt as string | Date),
+    updatedAt: toIsoString(row.updatedAt as string | Date),
+    notes: row.notes ?? undefined,
+    outputMaterialId: row.outputMaterialId ?? undefined,
+    libraryPath: row.libraryPath ?? undefined,
+  };
+};
 
 export const mapLibraryEntry = (row: LibraryEntryRow): MaterialLibraryEntry => ({
   id: row.id,
@@ -169,10 +184,10 @@ export const mapLibraryEntry = (row: LibraryEntryRow): MaterialLibraryEntry => (
   bytes: typeof row.bytes === "number" ? row.bytes : undefined,
   learningId: row.learningId ?? undefined,
   materialId: row.materialId ?? undefined,
-  originalSource: parseJson(row.originalSource),
+  originalSource: toMaybeJson(row.originalSource as string | JsonValue | null),
   notes: row.notes ?? undefined,
-  createdAt: row.createdAt,
-  updatedAt: row.updatedAt,
+  createdAt: typeof row.createdAt === "string" ? row.createdAt : row.createdAt.toISOString(),
+  updatedAt: typeof row.updatedAt === "string" ? row.updatedAt : row.updatedAt.toISOString(),
 });
 
 export const toJson = (value?: unknown) => (value === undefined ? null : JSON.stringify(value));

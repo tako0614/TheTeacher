@@ -653,10 +653,9 @@ app.delete("/api/materials/:id", async (c) => {
   await prisma.material.deleteMany({ where: { id, userId: user.id } });
   await ensureMaterialTables(c.env.DB);
   await deleteLibraryAssetsForMaterial(c.env, id);
-  await c.env.DB
-    .prepare("DELETE FROM MaterialLibraryEntry WHERE materialId = ? AND (userId IS NULL OR userId = ?)")
-    .bind(id, user.id)
-    .run();
+  await prisma.materialLibraryEntry.deleteMany({
+    where: { materialId: id, OR: [{ userId: null }, { userId: user.id }] },
+  });
   const generatedIds = generatedRows.map((row) => row.id).filter(Boolean);
   await deleteSemanticNodesByRef(c.env.DB, "material", [id], user.id);
   await deleteSemanticNodesByRef(c.env.DB, "generated_content", generatedIds, user.id);

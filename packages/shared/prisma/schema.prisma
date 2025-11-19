@@ -159,6 +159,65 @@ model SemanticNode {
   @@index([refId])
 }
 
+/// 教材ライブラリのエントリ
+model MaterialLibraryEntry {
+  id            String   @id @default(uuid())
+  userId        String?
+  displayName   String
+  storedPath    String
+  assetPath     String?
+  libraryPath   String?
+  type          MaterialType
+  bytes         Int?
+  learningId    String?
+  materialId    String?
+  originalSource Json?
+  notes         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  asset         MaterialLibraryAsset?
+
+  @@index([learningId])
+  @@index([materialId])
+  @@index([userId])
+  @@index([updatedAt])
+}
+
+/// ライブラリの埋め込みバイナリ
+model MaterialLibraryAsset {
+  entryId   String   @id
+  userId    String?
+  mimeType  String
+  size      Int
+  data      Bytes
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  entry     MaterialLibraryEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+/// 取り込みジョブ
+model MaterialIngestJob {
+  id                         String   @id @default(uuid())
+  userId                     String?
+  learningId                 String?
+  source                     Json
+  status                     String
+  steps                      Json
+  requestedAt                DateTime
+  updatedAt                  DateTime
+  preferredOcrEngine         String?
+  preferredTranscriptionEngine String?
+  notes                      String?
+  outputMaterialId           String?
+  libraryPath                String?
+
+  @@index([learningId])
+  @@index([updatedAt])
+  @@index([userId])
+}
+
 enum MaterialType {
   text
   pdf
