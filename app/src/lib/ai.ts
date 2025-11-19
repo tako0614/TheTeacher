@@ -21,6 +21,17 @@ export type ChatReply = {
   related: SemanticMatch[];
 };
 
+export type ToolName =
+  | "search_learnings"
+  | "create_learning_from_chat"
+  | "generate_questions"
+  | "save_content";
+
+export type ToolInvocation = {
+  tool: ToolName;
+  result: unknown;
+};
+
 const fallbackMatches: SemanticMatch[] = [
   {
     id: "local-1",
@@ -126,3 +137,13 @@ export const proxyChat = async (
     };
   }
 };
+
+export const invokeTool = async (
+  tool: ToolName,
+  params?: Record<string, unknown>,
+): Promise<ToolInvocation> =>
+  requestJson<ToolInvocation>({
+    path: "/ai/tools",
+    method: "POST",
+    body: { tool, params },
+  });

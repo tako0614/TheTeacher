@@ -53,4 +53,16 @@ describe("api worker", () => {
     expect(json.results[0].refType).toBe("learning");
     expect(json.results[0].subject).toBe("math");
   });
+
+  it("provides fallback data for tool-based learning search", async () => {
+    const res = await app.request("/ai/tools", {
+      method: "POST",
+      body: JSON.stringify({ tool: "search_learnings", params: { q: "数学" } }),
+    });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.tool).toBe("search_learnings");
+    expect(Array.isArray(json.result.items)).toBe(true);
+    expect(json.result.items.length).toBeGreaterThan(0);
+  });
 });

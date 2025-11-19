@@ -11,6 +11,7 @@ import {
   type Learning,
   type Material,
   type MaterialIngestRequest,
+  type MaterialLibraryEntry,
   type PracticeSession,
   type Preset,
   type SemanticNode,
@@ -21,11 +22,15 @@ import { Hono } from "hono";
 import { z } from "zod";
 
 import {
+  mapIngestJob,
+  mapLibraryEntry,
   parseJson,
   toJson,
   type GeneratedContentRow,
+  type IngestJobRow,
   type LearningWithStatsRow,
   type LearningRow,
+  type LibraryEntryRow,
   type MaterialRow,
   type PracticeSessionRow,
   type PresetRow,
@@ -58,6 +63,26 @@ const learningListQuerySchema = z.object({
 const presetListQuerySchema = z.object({
   subject: z.string().trim().min(1).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
+});
+
+const ingestJobListQuerySchema = z.object({
+  learningId: z.string().uuid().optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+});
+
+const libraryEntryListQuerySchema = z.object({
+  learningId: z.string().uuid().optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+});
+
+const toolCallSchema = z.object({
+  tool: z.enum([
+    "search_learnings",
+    "create_learning_from_chat",
+    "generate_questions",
+    "save_content",
+  ]),
+  params: z.record(z.string(), z.unknown()).optional(),
 });
 
 const upsertLearningSchema = schemas.learning
@@ -187,6 +212,72 @@ type AppEnv = {
 export const app = new Hono<AppEnv>();
 
 const nowIso = () => new Date().toISOString();
+let materialTablesReady: Promise<void> | null = null;
+
+const ensureMaterialTables = (db?: D1Database) => {
+  if (!db) return Promise.resolve();
+  if (!materialTablesReady) {
+    materialTablesReady = (async () => {
+      await db
+        .prepare(
+          `CREATE TABLE IF NOT EXISTS MaterialLibraryEntry (
+            id TEXT PRIMARY KEY,
+            displayName TEXT NOT NULL,
+            storedPath TEXT NOT NULL,
+            libraryPath TEXT,
+            type TEXT NOT NULL,
+            bytes INTEGER,
+            learningId TEXT,
+            materialId TEXT,
+            originalSource TEXT,
+            notes TEXT,
+            createdAt TEXT NOT NULL,
+            updatedAt TEXT NOT NULL
+          )`,
+        )
+        .run();
+      await db
+        .prepare("CREATE INDEX IF NOT EXISTS idx_material_library_learning ON MaterialLibraryEntry(learningId)")
+        .run();
+      await db
+        .prepare(
+          `CREATE TABLE IF NOT EXISTS MaterialIngestJob (
+            id TEXT PRIMARY KEY,
+            learningId TEXT,
+            source TEXT NOT NULL,
+            status TEXT NOT NULL,
+            steps TEXT NOT NULL,
+            requestedAt TEXT NOT NULL,
+            updatedAt TEXT NOT NULL,
+            preferredOcrEngine TEXT,
+            preferredTranscriptionEngine TEXT,
+            notes TEXT,
+            outputMaterialId TEXT,
+            libraryPath TEXT
+          )`,
+        )
+        .run();
+      await db
+        .prepare("CREATE INDEX IF NOT EXISTS idx_ingest_jobs_learning ON MaterialIngestJob(learningId)")
+        .run();
+      await db
+        .prepare("CREATE INDEX IF NOT EXISTS idx_ingest_jobs_updated ON MaterialIngestJob(updatedAt DESC)")
+        .run();
+    })();
+  }
+  return materialTablesReady;
+};
+
+class ToolCallError extends Error {
+  status: number;
+  code: string;
+
+  constructor(code: string, message: string, status = 400) {
+    super(message);
+    this.code = code;
+    this.status = status;
+  }
+}
 
 const mapLearning = (row: LearningWithStatsRow): Learning & {
   materialsCount: number;
@@ -217,6 +308,100 @@ const mapMaterial = (row: MaterialRow): Material => ({
   createdAt: row.createdAt,
   updatedAt: row.updatedAt,
 });
+
+const saveLibraryEntry = async (
+  db: D1Database,
+  entry: MaterialLibraryEntry,
+): Promise<MaterialLibraryEntry> => {
+  await ensureMaterialTables(db);
+  await db
+    .prepare(
+      `INSERT OR REPLACE INTO MaterialLibraryEntry
+        (id, displayName, storedPath, libraryPath, type, bytes, learningId, materialId, originalSource, notes, createdAt, updatedAt)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      entry.id,
+      entry.displayName,
+      entry.storedPath,
+      entry.libraryPath ?? null,
+      entry.type,
+      entry.bytes ?? null,
+      entry.learningId ?? null,
+      entry.materialId ?? null,
+      toJson(entry.originalSource),
+      entry.notes ?? null,
+      entry.createdAt,
+      entry.updatedAt,
+    )
+    .run();
+  const row = await db
+    .prepare("SELECT * FROM MaterialLibraryEntry WHERE id = ? LIMIT 1")
+    .bind(entry.id)
+    .first<LibraryEntryRow>();
+  return row ? mapLibraryEntry(row) : entry;
+};
+
+const saveIngestJob = async (db: D1Database, job: IngestJob): Promise<IngestJob> => {
+  await ensureMaterialTables(db);
+  await db
+    .prepare(
+      `INSERT OR REPLACE INTO MaterialIngestJob
+        (id, learningId, source, status, steps, requestedAt, updatedAt,
+          preferredOcrEngine, preferredTranscriptionEngine, notes, outputMaterialId, libraryPath)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      job.id,
+      job.learningId ?? null,
+      toJson(job.source),
+      job.status,
+      toJson(job.steps),
+      job.requestedAt,
+      job.updatedAt,
+      job.preferredOcrEngine ?? null,
+      job.preferredTranscriptionEngine ?? null,
+      job.notes ?? null,
+      job.outputMaterialId ?? null,
+      job.libraryPath ?? null,
+    )
+    .run();
+  const row = await db
+    .prepare("SELECT * FROM MaterialIngestJob WHERE id = ? LIMIT 1")
+    .bind(job.id)
+    .first<IngestJobRow>();
+  return row ? mapIngestJob(row) : job;
+};
+
+const listIngestJobs = async (db?: D1Database, learningId?: string, limit = 50) => {
+  if (!db) return [];
+  await ensureMaterialTables(db);
+  let sql = "SELECT * FROM MaterialIngestJob";
+  const binds: unknown[] = [];
+  if (learningId) {
+    sql += " WHERE learningId = ?";
+    binds.push(learningId);
+  }
+  sql += " ORDER BY updatedAt DESC LIMIT ?";
+  binds.push(limit);
+  const rows = await db.prepare(sql).bind(...binds).all<IngestJobRow>();
+  return rows.results?.map(mapIngestJob) ?? [];
+};
+
+const listLibraryEntries = async (db?: D1Database, learningId?: string, limit = 50) => {
+  if (!db) return [];
+  await ensureMaterialTables(db);
+  let sql = "SELECT * FROM MaterialLibraryEntry";
+  const binds: unknown[] = [];
+  if (learningId) {
+    sql += " WHERE learningId = ?";
+    binds.push(learningId);
+  }
+  sql += " ORDER BY updatedAt DESC LIMIT ?";
+  binds.push(limit);
+  const rows = await db.prepare(sql).bind(...binds).all<LibraryEntryRow>();
+  return rows.results?.map(mapLibraryEntry) ?? [];
+};
 
 const mapGeneratedContent = (row: GeneratedContentRow): GeneratedContent => ({
   id: row.id,
@@ -249,6 +434,48 @@ const mapPreset = (row: PresetRow): Preset => ({
   createdAt: row.createdAt,
   updatedAt: row.updatedAt,
 });
+
+const insertLearning = async (
+  db: D1Database,
+  data: Pick<Learning, "title"> &
+    Partial<Pick<Learning, "subject" | "tags" | "progress" | "id" | "createdAt" | "updatedAt">>,
+): Promise<Learning> => {
+  const id = data.id ?? crypto.randomUUID();
+  const createdAt = data.createdAt ?? nowIso();
+  const updatedAt = data.updatedAt ?? createdAt;
+
+  await db
+    .prepare(
+      `INSERT OR REPLACE INTO Learning (id, title, subject, tags, progress, createdAt, updatedAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      id,
+      data.title,
+      data.subject ?? null,
+      data.tags ? toJson(data.tags) : null,
+      data.progress ?? null,
+      createdAt,
+      updatedAt,
+    )
+    .run();
+
+  const learning = await fetchLearning(db, id);
+  return (
+    learning ?? {
+      id,
+      title: data.title,
+      subject: data.subject,
+      tags: data.tags,
+      progress: data.progress,
+      createdAt,
+      updatedAt,
+      materialsCount: 0,
+      generatedCount: 0,
+      sessionCount: 0,
+    }
+  );
+};
 
 const ingestStepTemplates: Record<
   IngestSource["kind"] | "fallback",
@@ -367,7 +594,33 @@ const fetchRemoteText = async (url: string): Promise<string> => {
 const extractMaterialFromSource = async (
   source: IngestSource,
   preferOffline = false,
+  payload?: MaterialIngestRequest["payload"],
 ) => {
+  const payloadText = payload?.text?.trim();
+  if (payloadText) {
+    const preview = summarizeText(payloadText);
+    return {
+      rawContent: payloadText,
+      extracted: {
+        preview,
+        tokens: payloadText.split(/\s+/).filter(Boolean).length,
+        format:
+          source.kind === "image"
+            ? ("ocr" as const)
+            : source.kind === "audio" || source.kind === "video"
+              ? ("transcript" as const)
+              : ("plain" as const),
+      },
+      metadata: {
+        sourceLabel: source.kind,
+        payloadFileName: payload.fileName,
+        payloadBytes: payload.bytes,
+        payloadMimeType: payload.mimeType,
+        payloadDataUrlPreview: payload.dataUrl?.slice(0, 120),
+      },
+    };
+  }
+
   if (source.kind === "text") {
     const rawContent = source.text.trim();
     const preview = summarizeText(rawContent);
@@ -449,6 +702,7 @@ const buildIngestJob = (
   request: MaterialIngestRequest,
   status: IngestJob["status"] = "completed",
   outputMaterialId?: string,
+  libraryPath?: string,
 ): IngestJob => {
   const now = nowIso();
   const steps = (ingestStepTemplates[request.source.kind] ?? ingestStepTemplates.fallback).map(
@@ -472,7 +726,45 @@ const buildIngestJob = (
     steps,
     notes: request.preferOffline ? "prefer_offline" : undefined,
     outputMaterialId,
-    libraryPath: "TheTeacher/materials",
+    libraryPath: libraryPath ?? "TheTeacher/materials",
+  };
+};
+
+const buildLibraryEntryRecord = (
+  material: Material,
+  request: MaterialIngestRequest,
+  options?: { entryId?: string; notes?: string },
+): MaterialLibraryEntry => {
+  const storedPath =
+    request.source.kind === "url"
+      ? request.source.url
+      : request.source.kind === "text"
+        ? `${material.id}.txt`
+        : request.source.path ?? material.sourcePath ?? material.id;
+  const displayName =
+    request.payload?.fileName ??
+    material.sourcePath ??
+    `${material.type.toUpperCase()}_${material.id.slice(0, 8)}`;
+  const inferredLibraryPath =
+    request.source.kind === "text"
+      ? `${material.learningId}/${material.id}.txt`
+      : request.source.kind === "url"
+        ? request.source.url
+        : request.source.path ?? request.payload?.fileName ?? storedPath;
+
+  return {
+    id: options?.entryId ?? crypto.randomUUID(),
+    displayName,
+    storedPath,
+    libraryPath: inferredLibraryPath,
+    type: material.type,
+    bytes: request.payload?.bytes,
+    learningId: material.learningId,
+    materialId: material.id,
+    originalSource: request.source,
+    notes: options?.notes,
+    createdAt: material.createdAt,
+    updatedAt: material.updatedAt,
   };
 };
 
@@ -716,27 +1008,7 @@ app.post("/api/learnings", async (c) => {
     return c.json({ error: "invalid_request", issues: parsed.error.format() }, 400);
   }
 
-  const data = parsed.data;
-  const id = data.id ?? crypto.randomUUID();
-  const createdAt = data.createdAt ?? nowIso();
-  const updatedAt = data.updatedAt ?? createdAt;
-
-  await c.env.DB.prepare(
-    `INSERT OR REPLACE INTO Learning (id, title, subject, tags, progress, createdAt, updatedAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  )
-    .bind(
-      id,
-      data.title,
-      data.subject ?? null,
-      toJson(data.tags),
-      data.progress ?? null,
-      createdAt,
-      updatedAt,
-    )
-    .run();
-
-  const learning = await fetchLearning(c.env.DB, id);
+  const learning = await insertLearning(c.env.DB, parsed.data);
   return c.json(learning, 201);
 });
 
@@ -804,11 +1076,13 @@ app.post("/api/materials/ingest", async (c) => {
   const learning = await fetchLearning(c.env.DB, request.learningId);
   if (!learning) return c.json({ error: "learning_not_found" }, 404);
 
-  const { rawContent, extracted, metadata } = await extractMaterialFromSource(
+  const { rawContent, extracted, metadata: ingestMetadata } = await extractMaterialFromSource(
     request.source,
     request.preferOffline ?? false,
+    request.payload,
   );
   const id = crypto.randomUUID();
+  const libraryEntryId = crypto.randomUUID();
   const createdAt = nowIso();
   const updatedAt = createdAt;
   const type = request.source.kind as Material["type"];
@@ -833,7 +1107,8 @@ app.post("/api/materials/ingest", async (c) => {
         ingestSource: request.source,
         preferOffline: request.preferOffline ?? false,
         extracted,
-        origin: metadata?.sourceLabel,
+        origin: ingestMetadata?.sourceLabel,
+        libraryEntryId,
       }),
       createdAt,
       updatedAt,
@@ -853,7 +1128,21 @@ app.post("/api/materials/ingest", async (c) => {
       updatedAt,
     } as Material);
 
-  const job = buildIngestJob(request, "completed", material.id);
+  const libraryEntry = await saveLibraryEntry(
+    c.env.DB,
+    buildLibraryEntryRecord(material, request, {
+      entryId: libraryEntryId,
+      notes: ingestMetadata?.sourceLabel,
+    }),
+  );
+  const jobDraft = buildIngestJob(
+    request,
+    "completed",
+    material.id,
+    libraryEntry.libraryPath ?? libraryEntry.storedPath,
+  );
+  const job = await saveIngestJob(c.env.DB, { ...jobDraft, outputMaterialId: material.id });
+
   return c.json(materialIngestResultSchema.parse({ material, job, extracted }), 201);
 });
 
@@ -890,6 +1179,26 @@ app.post("/api/materials", async (c) => {
     .bind(id)
     .first<MaterialRow>();
   return c.json(row ? mapMaterial(row) : null, 201);
+});
+
+app.get("/api/ingest-jobs", async (c) => {
+  const query = Object.fromEntries(new URL(c.req.url).searchParams);
+  const parsed = ingestJobListQuerySchema.safeParse(query);
+  if (!parsed.success) {
+    return c.json({ error: "invalid_query", issues: parsed.error.format() }, 400);
+  }
+  const items = await listIngestJobs(c.env.DB, parsed.data.learningId, parsed.data.limit);
+  return c.json({ items, count: items.length });
+});
+
+app.get("/api/materials/library", async (c) => {
+  const query = Object.fromEntries(new URL(c.req.url).searchParams);
+  const parsed = libraryEntryListQuerySchema.safeParse(query);
+  if (!parsed.success) {
+    return c.json({ error: "invalid_query", issues: parsed.error.format() }, 400);
+  }
+  const items = await listLibraryEntries(c.env.DB, parsed.data.learningId, parsed.data.limit);
+  return c.json({ items, count: items.length });
 });
 
 app.put("/api/materials/:id", async (c) => {
@@ -1187,9 +1496,57 @@ const flattenContent = (content: unknown): string => {
   return String(content);
 };
 
+const fallbackSemanticNodes = (): Array<SemanticNodeWithMeta & { embedding: number[] }> =>
+  [
+    {
+      id: "fallback-learning",
+      refType: "learning",
+      refId: "fallback-learning",
+      embedding: toEmbedding("高校数学 二次関数 基礎練習"),
+      metadata: { tags: ["math"] },
+      label: "高校数学I: 二次関数",
+      excerpt: "二次関数の基本変換と判別式を確認する練習セット",
+      subject: "math",
+    },
+  ].map((node) => ({ ...node, embedding: node.embedding.slice() }));
+
+const fallbackLearnings: Array<
+  Learning & { materialsCount: number; generatedCount: number; sessionCount: number }
+> = [
+  {
+    id: "fallback-learning",
+    title: "高校数学I_二次関数_第1回",
+    subject: "math",
+    tags: ["demo", "math"],
+    progress: 0.2,
+    createdAt: "2024-11-01T00:00:00.000Z",
+    updatedAt: "2024-11-03T00:00:00.000Z",
+    materialsCount: 2,
+    generatedCount: 3,
+    sessionCount: 5,
+  },
+];
+
+const normalizeTagsInput = (value: unknown): string[] | undefined => {
+  if (!value) return undefined;
+  if (Array.isArray(value)) {
+    return value
+      .map((tag) => String(tag ?? "").trim())
+      .filter((tag) => tag.length > 0);
+  }
+  if (typeof value === "string") {
+    return value
+      .split(",")
+      .map((tag) => tag.trim())
+      .filter((tag) => tag.length > 0);
+  }
+  return undefined;
+};
+
 const buildSemanticIndex = async (
-  db: D1Database,
+  db?: D1Database,
 ): Promise<Array<SemanticNodeWithMeta & { embedding: number[] }>> => {
+  if (!db) return fallbackSemanticNodes();
   const learningRows = await db
     .prepare("SELECT * FROM Learning ORDER BY updatedAt DESC LIMIT 200")
     .all<LearningRow>();
@@ -1261,23 +1618,11 @@ const buildSemanticIndex = async (
 
   if (nodes.length > 0) return nodes;
 
-  // Fallback samples when DB is empty
-  return [
-    {
-      id: "fallback-learning",
-      refType: "learning",
-      refId: "fallback-learning",
-      embedding: toEmbedding("数学 二次関数 例題"),
-      metadata: { tags: ["math"] },
-      label: "高校数学I: 二次関数",
-      excerpt: "二次関数の平方完成や軸・頂点を扱う練習セット",
-      subject: "math",
-    },
-  ].map((node) => ({ ...node, embedding: node.embedding.slice() }));
+  return fallbackSemanticNodes();
 };
 
 const searchSemantic = async (
-  db: D1Database,
+  db: D1Database | undefined,
   query: string,
   topK: number,
   filters?: Partial<Pick<SemanticNodeWithMeta, "refType" | "subject">>,
@@ -1304,6 +1649,110 @@ const searchSemantic = async (
   }));
 };
 
+const executeToolCall = async (
+  db: D1Database | undefined,
+  tool: z.infer<typeof toolCallSchema>["tool"],
+  params: Record<string, unknown>,
+) => {
+  if (tool === "search_learnings") {
+    if (!db) {
+      return { items: fallbackLearnings };
+    }
+    const query = learningListQuerySchema.parse({
+      q: typeof params.q === "string" ? params.q : undefined,
+      subject: typeof params.subject === "string" ? params.subject : undefined,
+      tag: typeof params.tag === "string" ? params.tag : undefined,
+      limit: params.limit ? Number(params.limit) : 10,
+    });
+    const { sql, binds } = buildLearningListQuery(query);
+    const rows = await db.prepare(sql).bind(...binds).all<LearningWithStatsRow>();
+    return { items: rows.results?.map(mapLearning) ?? [] };
+  }
+
+  if (tool === "create_learning_from_chat") {
+    if (!db) throw new ToolCallError("db_unavailable", "Database is not available", 503);
+    const title =
+      typeof params.title === "string" && params.title.trim().length > 0
+        ? params.title.trim()
+        : undefined;
+    if (!title) {
+      throw new ToolCallError("invalid_params", "title is required");
+    }
+    const subject =
+      typeof params.subject === "string" && params.subject.trim().length > 0
+        ? params.subject.trim()
+        : undefined;
+    const tags = normalizeTagsInput(params.tags);
+    const learning = await insertLearning(db, { title, subject, tags });
+    return { learning };
+  }
+
+  if (tool === "generate_questions") {
+    if (!db) throw new ToolCallError("db_unavailable", "Database is not available", 503);
+    const normalizedTypes =
+      Array.isArray(params.types) && params.types.length > 0
+        ? params.types
+            .map((value) => (typeof value === "string" ? value : ""))
+            .filter(Boolean)
+        : undefined;
+    const request = generateFromMaterialRequestSchema.parse({
+      learningId: params.learningId,
+      materialId: params.materialId,
+      types: normalizedTypes,
+      presetId: params.presetId,
+      presetTitle: params.presetTitle,
+      presetSystemPrompt: params.presetSystemPrompt,
+      presetUserTemplate: params.presetUserTemplate,
+    });
+    const learning = await fetchLearning(db, request.learningId);
+    if (!learning) {
+      throw new ToolCallError("not_found", "learning not found", 404);
+    }
+    const material =
+      request.materialId && request.materialId.length > 0
+        ? await fetchMaterial(db, request.materialId)
+        : await fetchLatestMaterialForLearning(db, request.learningId);
+    if (request.materialId && !material) {
+      throw new ToolCallError("not_found", "material not found", 404);
+    }
+    const preset = await resolvePresetContext(db, request);
+    const drafts = craftGeneratedContents(request, material, preset);
+    const items: GeneratedContent[] = [];
+    for (const draft of drafts) {
+      items.push(await saveGeneratedContent(db, draft));
+    }
+    const job = buildGenerationJob(request.types, preset);
+    return { material, items, job };
+  }
+
+  if (tool === "save_content") {
+    if (!db) throw new ToolCallError("db_unavailable", "Database is not available", 503);
+    const input = {
+      learningId: params.learningId,
+      materialId: params.materialId,
+      type: params.type,
+      content: params.content,
+      promptPreset: params.promptPreset,
+    };
+    const parsed = z
+      .object({
+        learningId: z.string().uuid(),
+        materialId: z.string().uuid().optional(),
+        type: schemas.generatedContent.shape.type,
+        content: z.record(z.string(), z.unknown()),
+        promptPreset: z.string().min(1).optional(),
+      })
+      .safeParse(input);
+    if (!parsed.success) {
+      throw new ToolCallError("invalid_params", JSON.stringify(parsed.error.format()));
+    }
+    const saved = await saveGeneratedContent(db, parsed.data);
+    return { content: saved };
+  }
+
+  throw new ToolCallError("unsupported_tool", `tool "${tool}" is not supported`, 400);
+};
+
 app.post("/ai/embed", async (c) => {
   const body = await c.req.json().catch(() => null);
   const parsed = embedRequestSchema.safeParse(body);
@@ -1328,9 +1777,34 @@ app.post("/search/semantic", async (c) => {
   }
 
   const { query, topK, refType, subject } = parsed.data;
-  const results = await searchSemantic(c.env.DB, query, topK, { refType, subject });
+  const results = await searchSemantic(c.env?.DB, query, topK, { refType, subject });
 
   return c.json({ query, topK, results });
+});
+
+app.post("/ai/tools", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  const parsed = toolCallSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: "invalid_request", issues: parsed.error.format() }, 400);
+  }
+
+  try {
+    const result = await executeToolCall(c.env?.DB, parsed.data.tool, parsed.data.params ?? {});
+    return c.json({ tool: parsed.data.tool, result });
+  } catch (error) {
+    if (error instanceof ToolCallError) {
+      return c.json({ error: error.code, message: error.message }, error.status);
+    }
+    console.error("tool call failed", error);
+    return c.json(
+      {
+        error: "tool_failed",
+        message: error instanceof Error ? error.message : "unknown error",
+      },
+      500,
+    );
+  }
 });
 
 app.post("/ai/proxy", async (c) => {
@@ -1348,7 +1822,7 @@ app.post("/ai/proxy", async (c) => {
   }
 
   const topK = parsed.data.topK ?? 3;
-  const related = await searchSemantic(c.env.DB, parsed.data.prompt, topK);
+  const related = await searchSemantic(c.env?.DB, parsed.data.prompt, topK);
   const toolCalls = [
     {
       tool: "embed",

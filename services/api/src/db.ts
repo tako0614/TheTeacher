@@ -1,4 +1,9 @@
-import { type GeneratedContentType, type MaterialType } from "@theteacher/shared";
+import {
+  type GeneratedContentType,
+  type IngestJob,
+  type MaterialLibraryEntry,
+  type MaterialType,
+} from "@theteacher/shared";
 
 type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 
@@ -62,6 +67,36 @@ export type LearningWithStatsRow = LearningRow & {
   lastStudiedAt?: string | null;
 };
 
+export type IngestJobRow = {
+  id: string;
+  learningId?: string | null;
+  source: string;
+  status: string;
+  steps: string;
+  requestedAt: string;
+  updatedAt: string;
+  preferredOcrEngine?: string | null;
+  preferredTranscriptionEngine?: string | null;
+  notes?: string | null;
+  outputMaterialId?: string | null;
+  libraryPath?: string | null;
+};
+
+export type LibraryEntryRow = {
+  id: string;
+  displayName: string;
+  storedPath: string;
+  libraryPath?: string | null;
+  type: MaterialType;
+  bytes?: number | null;
+  learningId?: string | null;
+  materialId?: string | null;
+  originalSource?: string | null;
+  notes?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export const parseJson = <T = JsonValue>(value?: string | null): T | undefined => {
   if (!value) return undefined;
   try {
@@ -70,5 +105,35 @@ export const parseJson = <T = JsonValue>(value?: string | null): T | undefined =
     return undefined;
   }
 };
+
+export const mapIngestJob = (row: IngestJobRow): IngestJob => ({
+  id: row.id,
+  learningId: row.learningId ?? undefined,
+  status: row.status as IngestJob["status"],
+  source: parseJson(row.source)!,
+  steps: parseJson(row.steps) ?? [],
+  preferredOcrEngine: row.preferredOcrEngine ?? undefined,
+  preferredTranscriptionEngine: row.preferredTranscriptionEngine ?? undefined,
+  requestedAt: row.requestedAt,
+  updatedAt: row.updatedAt,
+  notes: row.notes ?? undefined,
+  outputMaterialId: row.outputMaterialId ?? undefined,
+  libraryPath: row.libraryPath ?? undefined,
+});
+
+export const mapLibraryEntry = (row: LibraryEntryRow): MaterialLibraryEntry => ({
+  id: row.id,
+  displayName: row.displayName,
+  storedPath: row.storedPath,
+  libraryPath: row.libraryPath ?? undefined,
+  type: row.type,
+  bytes: typeof row.bytes === "number" ? row.bytes : undefined,
+  learningId: row.learningId ?? undefined,
+  materialId: row.materialId ?? undefined,
+  originalSource: parseJson(row.originalSource),
+  notes: row.notes ?? undefined,
+  createdAt: row.createdAt,
+  updatedAt: row.updatedAt,
+});
 
 export const toJson = (value?: JsonValue) => (value === undefined ? null : JSON.stringify(value));

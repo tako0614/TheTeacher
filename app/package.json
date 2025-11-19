@@ -18,6 +18,8 @@
     "@tauri-apps/api": "^2.0.4",
     "@tauri-apps/plugin-http": "^2.0.2",
     "@theteacher/shared": "workspace:^0.1.0",
+    "ocrad.js": "^1.0.0",
+    "pdfjs-dist": "^4.8.69",
     "solid-js": "^1.9.3"
   },
   "devDependencies": {

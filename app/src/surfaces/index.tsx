@@ -13,12 +13,9 @@ import {
   type GeneratedContentType,
   type IngestJob,
   type GeneratedContent,
-  type GenerationJob,
-  type GenerateFromMaterialRequest,
   type MaterialIngestRequest,
   type MaterialLibraryConfig,
   type MaterialType,
-  type MaterialIngestResult,
   type Preset,
 } from "@theteacher/shared";
 
@@ -30,6 +27,8 @@ import {
 import {
   type SemanticMatch,
   type ToolCallLog,
+  type ToolName,
+  invokeTool,
   proxyChat,
   semanticSearch,
 } from "../lib/ai";
@@ -50,12 +49,12 @@ import {
   createPreset,
   updatePreset,
   deletePreset as deletePresetApi,
-  updateMaterial,
   replaceSnapshot,
   type SnapshotPayload,
 } from "../lib/api-client";
 import { buildBackupSnapshot, downloadSnapshot, parseSnapshotFile } from "../lib/backup";
 import { selectPresetOptions, useSettings } from "../lib/settings-store";
+import { processMaterialFile } from "../lib/file-processing";
 
 const subjects = [
   { id: "all", label: "すべて" },
@@ -166,19 +165,21 @@ const LearningListSurface: Component = () => {
         <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
           <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
             <div class="flex flex-wrap gap-2">
-              {subjects.map((item) => (
-                <button
-                  type="button"
-                  class={`rounded-full border px-3 py-1 text-xs font-semibold transition ${
-                    subject() === item.id
-                      ? "border-indigo-200 bg-indigo-50 text-indigo-800"
-                      : "border-slate-200 text-slate-700 hover:bg-slate-50"
-                  }`}
-                  onClick={() => setSubject(item.id)}
-                >
-                  {item.label}
-                </button>
-              ))}
+              <For each={subjects}>
+                {(item) => (
+                  <button
+                    type="button"
+                    class={`rounded-full border px-3 py-1 text-xs font-semibold transition ${
+                      subject() === item.id
+                        ? "border-indigo-200 bg-indigo-50 text-indigo-800"
+                        : "border-slate-200 text-slate-700 hover:bg-slate-50"
+                    }`}
+                    onClick={() => setSubject(item.id)}
+                  >
+                    {item.label}
+                  </button>
+                )}
+              </For>
             </div>
             <input
               value={query()}
@@ -340,6 +341,8 @@ const LearningDetailSurface: Component = () => {
   const [materialText, setMaterialText] = createSignal("");
   const [materialFileName, setMaterialFileName] = createSignal("");
   const [materialBytes, setMaterialBytes] = createSignal<number | undefined>();
+  const [materialPayload, setMaterialPayload] =
+    createSignal<MaterialIngestRequest["payload"]>();
   const [saveMessage, setSaveMessage] = createSignal<string | null>(null);
   const [isIngesting, setIsIngesting] = createSignal(false);
   const [isGenerating, setIsGenerating] = createSignal(false);
@@ -349,7 +352,10 @@ const LearningDetailSurface: Component = () => {
   );
   const [learning] = createResource(
     () => searchParams.id ?? learningList()?.[0]?.id,
-    (id) => (id ? fetchLearning(id) : undefined),
+    (id) => {
+      const targetId = Array.isArray(id) ? id[0] : id;
+      return targetId ? fetchLearning(targetId) : undefined;
+    },
   );
   const [materials, { refetch: refetchMaterials }] = createResource(
     () => learning()?.id,
@@ -416,6 +422,14 @@ const LearningDetailSurface: Component = () => {
   });
 
   createEffect(() => {
+    // 別の種別に切り替えたら選択済みファイルのメタ情報を破棄する
+    materialType();
+    setMaterialPayload(undefined);
+    setMaterialFileName("");
+    setMaterialBytes(undefined);
+  });
+
+  createEffect(() => {
     const list = materials();
     if (!list?.length) return;
     if (!selectedMaterialId() || !list.some((m) => m.id === selectedMaterialId())) {
@@ -452,9 +466,21 @@ const LearningDetailSurface: Component = () => {
     if (!target || !config) return;
 
     const textContent = materialText().trim();
-    if (materialType() === "text" && !textContent) {
-      setSaveMessage("テキスト教材を入力してください。");
-      return;
+    let payload: MaterialIngestRequest["payload"] | undefined;
+
+    if (materialType() === "text") {
+      if (!textContent) {
+        setSaveMessage("テキスト教材を入力してください。");
+        return;
+      }
+      payload = {
+        text: textContent,
+        fileName: materialFileName().trim() || `${target.title}.txt`,
+        bytes: textContent.length,
+        mimeType: "text/plain",
+      };
+    } else {
+      payload = materialPayload();
     }
 
     const urlValue = materialFileName().trim() || materialSource();
@@ -471,12 +497,18 @@ const LearningDetailSurface: Component = () => {
               path: materialFileName() || materialSource(),
             };
 
+    if (!payload && materialType() !== "url") {
+      setSaveMessage("ファイルの処理が完了していません。再度選択してください。");
+      return;
+    }
+
     setIsIngesting(true);
     try {
       const result = await ingestMaterial({
         learningId: target.id,
         source,
         preferOffline: true,
+        payload,
       });
       setIngestQueue((prev) => [result.job, ...prev]);
       setSelectedMaterialId(result.material.id);
@@ -487,6 +519,7 @@ const LearningDetailSurface: Component = () => {
       }
       setMaterialFileName("");
       setMaterialBytes(undefined);
+      setMaterialPayload(undefined);
       await refetchMaterials();
       setSaveMessage(
         `教材(${result.material.type})を保存し、抽出テキストを反映しました。`,
@@ -507,17 +540,35 @@ const LearningDetailSurface: Component = () => {
     if (!file) {
       setMaterialFileName("");
       setMaterialBytes(undefined);
+      setMaterialPayload(undefined);
       return;
     }
     setMaterialFileName(file.name);
     setMaterialBytes(file.size);
-    if (materialType() === "text") {
-      try {
-        const text = await file.text();
-        setMaterialText(text.slice(0, 4000));
-      } catch {
+    try {
+      const processed = await processMaterialFile(file, materialType());
+      setMaterialPayload({
+        text: processed.text,
+        dataUrl: processed.dataUrl,
+        fileName: processed.fileName,
+        bytes: processed.bytes,
+        mimeType: processed.mimeType,
+      });
+      if (processed.text) {
+        setMaterialText(processed.text.slice(0, 4000));
+      } else {
         setMaterialText("");
       }
+      if (processed.text) {
+        setSaveMessage(
+          `${materialType().toUpperCase()} から ${processed.text.length} 文字を抽出しました。`,
+        );
+      }
+    } catch (error) {
+      console.error(error);
+      setMaterialPayload(undefined);
+      setMaterialText("");
+      setSaveMessage("ファイル処理に失敗しました。テキストを手入力してください。");
     }
   };
 
@@ -559,21 +610,7 @@ const LearningDetailSurface: Component = () => {
     }
   };
 
-  if (!learning()) {
-    return (
-      <section class="space-y-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-        <p class="text-sm text-slate-700">
-          学習がまだありません。まず「学習一覧」でカードを追加してください。
-        </p>
-        <button
-          class="w-fit rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
-          onClick={() => navigate("/")}
-        >
-          学習一覧に戻る
-        </button>
-      </section>
-    );
-  }
+  /* Early return removed */
 
   const stats = createMemo(() => {
     const sessions = practiceSessions() ?? [];
@@ -594,10 +631,26 @@ const LearningDetailSurface: Component = () => {
       progress: learning()?.progress ?? 0,
     };
   });
-  const selectedTabContents = generatedByType()[tab()] ?? [];
+  const selectedTabContents = createMemo(() => generatedByType()[tab()] ?? []);
 
   return (
-    <section class="space-y-6">
+    <Show
+      when={learning()}
+      fallback={
+        <section class="space-y-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+          <p class="text-sm text-slate-700">
+            学習がまだありません。まず「学習一覧」でカードを追加してください。
+          </p>
+          <button
+            class="w-fit rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+            onClick={() => navigate("/")}
+          >
+            学習一覧に戻る
+          </button>
+        </section>
+      }
+    >
+      <section class="space-y-6">
       <header class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <div>
           <p class="text-xs font-semibold uppercase tracking-wide text-indigo-600">
@@ -669,7 +722,7 @@ const LearningDetailSurface: Component = () => {
                   <For each={materials() ?? []}>
                     {(mat) => (
                       <option value={mat.id}>
-                        {mat.metadata?.name ??
+                        {(mat.metadata?.name as string) ??
                           mat.sourcePath ??
                           `${mat.type.toUpperCase()}教材`}
                       </option>
@@ -702,14 +755,14 @@ const LearningDetailSurface: Component = () => {
 
           <div class="mt-4 space-y-3">
             <Show
-              when={selectedTabContents.length > 0}
+              when={selectedTabContents().length > 0}
               fallback={
                 <div class="rounded-lg border border-dashed border-slate-200 bg-stone-50 px-4 py-6 text-sm text-slate-700">
                   まだ生成されたコンテンツがありません。教材の追加後に生成してください。
                 </div>
               }
             >
-              <For each={selectedTabContents}>
+              <For each={selectedTabContents()}>
                 {(item) => (
                   <article class="rounded-lg border border-slate-200 bg-slate-50/70 px-4 py-3">
                     <div class="flex items-start justify-between gap-2">
@@ -725,8 +778,8 @@ const LearningDetailSurface: Component = () => {
                         <p class="mt-1 text-sm text-slate-700">
                           {typeof (item.content as Record<string, unknown>)
                             .preview === "string"
-                            ? (item.content as Record<string, unknown>)
-                                .preview
+                            ? ((item.content as Record<string, unknown>)
+                                .preview as string)
                             : "要約・問題などの本文は生成API接続後に差し替え予定"}
                         </p>
                       </div>
@@ -876,10 +929,11 @@ const LearningDetailSurface: Component = () => {
               {materialBytes() ? formatBytes(materialBytes()) : "サイズ未計測"}
             </div>
             <button
-              class="rounded-lg bg-indigo-600 px-4 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500"
+              class="rounded-lg bg-indigo-600 px-4 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-70"
               onClick={handleAddMaterial}
+              disabled={isIngesting()}
             >
-              教材を保存
+              {isIngesting() ? "保存中..." : "教材を保存"}
             </button>
           </div>
           <Show when={saveMessage()}>
@@ -975,7 +1029,7 @@ const LearningDetailSurface: Component = () => {
             </p>
             <div class="mt-2 space-y-2 text-sm text-slate-700">
               <Show
-                when={practiceSessions().length > 0}
+                when={(practiceSessions()?.length ?? 0) > 0}
                 fallback={
                   <p class="text-slate-600">演習履歴がまだありません。</p>
                 }
@@ -985,7 +1039,7 @@ const LearningDetailSurface: Component = () => {
                     <div class="rounded-md bg-slate-50 px-3 py-2">
                       <div class="flex items-center justify-between">
                         <span class="font-semibold text-slate-800">
-                          {session.questionRef?.title ?? "演習"}
+                          {(session.questionRef?.title as string) ?? "演習"}
                         </span>
                         <span class="text-xs text-slate-500">
                           {formatDateTime(session.createdAt)}
@@ -1011,19 +1065,20 @@ const LearningDetailSurface: Component = () => {
         </div>
       </div>
     </section>
+    </Show>
   );
 };
 
 
 const PracticeSurface: Component = () => {
-  type Question = {
+  interface Question {
     id: string;
     generatedContentId: string;
     title: string;
     prompt: string;
     expected?: string;
     hint?: string;
-  };
+  }
 
   const [mode, setMode] = createSignal<"handwriting" | "text">("text");
   const [selectedLearningId, setSelectedLearningId] = createSignal<string>();
@@ -1058,7 +1113,7 @@ const PracticeSurface: Component = () => {
     for (const content of contents) {
       const payload = content.content as Record<string, unknown>;
       if (content.type === "practice" && Array.isArray(payload.items)) {
-        for (const item of payload.items as Array<Record<string, string>>) {
+        for (const item of payload.items as Record<string, string>[]) {
           extracted.push({
             id: crypto.randomUUID(),
             generatedContentId: content.id,
@@ -1069,7 +1124,7 @@ const PracticeSurface: Component = () => {
           });
         }
       } else if (content.type === "qa" && Array.isArray(payload.pairs)) {
-        for (const pair of payload.pairs as Array<Record<string, string>>) {
+        for (const pair of payload.pairs as Record<string, string>[]) {
           extracted.push({
             id: crypto.randomUUID(),
             generatedContentId: content.id,
@@ -1322,9 +1377,9 @@ const PracticeSurface: Component = () => {
                   {(session) => (
                     <div class="rounded-md bg-white p-2 text-slate-800">
                       <p class="text-xs font-semibold uppercase text-slate-500">
-                        {session.questionRef?.title ?? "演習"}
+                        {(session.questionRef?.title as string) ?? "演習"}
                       </p>
-                      <p class="mt-1 text-sm">{session.questionRef?.prompt}</p>
+                      <p class="mt-1 text-sm">{(session.questionRef?.prompt as string)}</p>
                       <p class="text-xs text-slate-500">
                         あなた: {session.answerText} / score {session.score ? (session.score * 100).toFixed(0) : "-"}%
                       </p>
@@ -1344,7 +1399,7 @@ const PracticeSurface: Component = () => {
 };
 
 const ChatSurface: Component = () => {
-  type ChatMessage = { role: "user" | "assistant"; content: string };
+  interface ChatMessage { role: "user" | "assistant"; content: string }
   const [messages, setMessages] = createSignal<ChatMessage[]>([
     {
       role: "assistant",
@@ -1364,6 +1419,11 @@ const ChatSurface: Component = () => {
   const [isSending, setIsSending] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
 
+  const [toolSearchQuery, setToolSearchQuery] = createSignal("");
+  const [toolNewLearningTitle, setToolNewLearningTitle] = createSignal("");
+  const [toolNewLearningSubject, setToolNewLearningSubject] = createSignal("");
+  const [isToolRunning, setIsToolRunning] = createSignal(false);
+
   const appendMessage = (role: ChatMessage["role"], content: string) =>
     setMessages((prev) => [...prev, { role, content }]);
 
@@ -1378,6 +1438,48 @@ const ChatSurface: Component = () => {
         result: results[0] ? results[0].label : "結果なし",
       },
     ]);
+  };
+
+  const runToolCall = async (tool: ToolName, params: Record<string, unknown>) => {
+    setError(null);
+    setIsToolRunning(true);
+    try {
+      const payload = await invokeTool(tool, params);
+      setToolCalls((prev) => [
+        ...prev,
+        {
+          tool: payload.tool,
+          detail: JSON.stringify(params),
+          result:
+            typeof payload.result === "string"
+              ? payload.result
+              : JSON.stringify(payload.result).slice(0, 160),
+        },
+      ]);
+      if (payload.tool === "search_learnings") {
+        const items = (payload.result as { items?: { title: string; subject?: string }[] })
+          ?.items;
+        if (items?.length) {
+          appendMessage(
+            "assistant",
+            `検索結果: ${items
+              .map((item) => `${item.title}${item.subject ? ` (${item.subject})` : ""}`)
+              .join(", ")}`,
+          );
+        }
+      }
+      if (payload.tool === "create_learning_from_chat") {
+        const learning = (payload.result as { learning?: { title: string } }).learning;
+        if (learning) {
+          appendMessage("assistant", `学習カードを作成しました: ${learning.title}`);
+        }
+      }
+    } catch (err) {
+      console.error(err);
+      setError("Tool Callに失敗しました。もう一度お試しください。");
+    } finally {
+      setIsToolRunning(false);
+    }
   };
 
   const handleSend = async () => {
@@ -1464,6 +1566,61 @@ const ChatSurface: Component = () => {
             </Show>
           </div>
 
+          <div class="space-y-3 rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-800">
+            <p class="text-xs font-semibold uppercase text-slate-500">Tool Call Playground</p>
+            <label class="flex flex-col gap-1">
+              <span class="text-xs font-semibold text-slate-600">学習検索クエリ</span>
+              <input
+                class="rounded-md border border-slate-200 px-2 py-1"
+                placeholder="例: 二次関数"
+                value={toolSearchQuery()}
+                onInput={(event) => setToolSearchQuery(event.currentTarget.value)}
+              />
+            </label>
+            <button
+              class="w-full rounded-md bg-indigo-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
+              onClick={() =>
+                runToolCall("search_learnings", {
+                  q: toolSearchQuery().trim(),
+                  limit: 5,
+                })
+              }
+              disabled={isToolRunning() || !toolSearchQuery().trim()}
+            >
+              学習カードを検索
+            </button>
+            <div class="h-px w-full bg-slate-200" />
+            <label class="flex flex-col gap-1">
+              <span class="text-xs font-semibold text-slate-600">新しい学習タイトル</span>
+              <input
+                class="rounded-md border border-slate-200 px-2 py-1"
+                placeholder="例: 英単語ターゲット"
+                value={toolNewLearningTitle()}
+                onInput={(event) => setToolNewLearningTitle(event.currentTarget.value)}
+              />
+            </label>
+            <label class="flex flex-col gap-1">
+              <span class="text-xs font-semibold text-slate-600">科目 (任意)</span>
+              <input
+                class="rounded-md border border-slate-200 px-2 py-1"
+                placeholder="math / english など"
+                value={toolNewLearningSubject()}
+                onInput={(event) => setToolNewLearningSubject(event.currentTarget.value)}
+              />
+            </label>
+            <button
+              class="w-full rounded-md bg-emerald-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-60"
+              onClick={() =>
+                runToolCall("create_learning_from_chat", {
+                  title: toolNewLearningTitle().trim(),
+                  subject: toolNewLearningSubject().trim() || undefined,
+                })
+              }
+              disabled={isToolRunning() || !toolNewLearningTitle().trim()}
+            >
+              学習カードを作成
+            </button>
+          </div>
           <div class="space-y-2 rounded-lg border border-emerald-200 bg-emerald-50 p-3">
             <p class="text-xs font-semibold uppercase text-emerald-700">
               意味検索結果
@@ -1809,10 +1966,12 @@ const NewLearningSurface: Component = () => {
       const materialList =
         materials()
           ?.filter((mat) => selectedMaterialIds().includes(mat.id))
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars
           .map(({ id: _id, learningId: _learning, createdAt: _c, updatedAt: _u, ...rest }) => rest) ?? [];
       const contentList =
         generatedContents()
           ?.filter((content) => selectedContentIds().includes(content.id))
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars
           .map(({ id: _id, learningId: _learning, createdAt: _c, ...rest }) => rest) ?? [];
 
       await Promise.all(
@@ -2312,14 +2471,10 @@ const AppSettingsSurface: Component = () => {
               />
             </div>
             <Show when={backupMessage()}>
-              {(message) => (
-                <p class="text-xs text-emerald-700">{message}</p>
-              )}
+              <p class="text-xs text-emerald-700">{backupMessage()}</p>
             </Show>
             <Show when={backupError()}>
-              {(message) => (
-                <p class="text-xs text-rose-700">{message}</p>
-              )}
+              <p class="text-xs text-rose-700">{backupError()}</p>
             </Show>
           </div>
         </div>
@@ -2414,14 +2569,12 @@ const AppSettingsSurface: Component = () => {
               編集をクリア
             </button>
             <Show when={editingPresetId()}>
-              {(id) => (
                 <button
                   class="rounded-md border border-rose-200 px-3 py-2 text-xs font-semibold text-rose-700 hover:bg-rose-50"
-                  onClick={() => deletePreset(id)}
+                  onClick={() => deletePreset(editingPresetId()!)}
                 >
                   削除
                 </button>
-              )}
             </Show>
           </div>
         </div>
@@ -2484,7 +2637,7 @@ const AppSettingsSurface: Component = () => {
   );
 };
 
-export type Surface = {
+export interface Surface {
   path: string;
   name: string;
   description: string;

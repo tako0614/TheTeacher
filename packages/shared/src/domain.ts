@@ -102,3 +102,6 @@ export type GeneratedContent = z.infer<typeof generatedContentSchema>;
 export type PracticeSession = z.infer<typeof practiceSessionSchema>;
 export type Preset = z.infer<typeof presetSchema>;
 export type SemanticNode = z.infer<typeof semanticNodeSchema>;
+export type MaterialType = z.infer<typeof materialTypeSchema>;
+export type GeneratedContentType = z.infer<typeof generatedContentTypeSchema>;
+export type RefType = z.infer<typeof refTypeSchema>;

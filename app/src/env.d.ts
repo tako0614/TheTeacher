@@ -7,3 +7,9 @@ interface ImportMetaEnv {
 interface ImportMeta {
   readonly env: ImportMetaEnv;
 }
+
+declare module "ocrad.js" {
+  type OCRInput = HTMLCanvasElement | CanvasRenderingContext2D | ImageData;
+  function OCRAD(input: OCRInput): string;
+  export default OCRAD;
+}

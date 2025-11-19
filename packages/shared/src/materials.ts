@@ -83,7 +83,11 @@ export const libraryEntrySchema = z.object({
   storedPath: z.string().min(1),
   type: materialTypeSchema,
   bytes: z.number().int().nonnegative().optional(),
+  learningId: z.string().uuid().optional(),
+  materialId: z.string().uuid().optional(),
+  libraryPath: z.string().min(1).optional(),
   originalSource: ingestSourceSchema.optional(),
+  notes: z.string().optional(),
   createdAt: isoDateTimeString,
   updatedAt: isoDateTimeString,
 });
@@ -94,6 +98,15 @@ export const ingestRequestSchema = z.object({
   preferOffline: z.boolean().optional(),
   ocrEngine: ocrEngineSchema.optional(),
   transcriptionEngine: transcriptionEngineSchema.optional(),
+  payload: z
+    .object({
+      text: z.string().min(1).optional(),
+      dataUrl: z.string().startsWith("data:").optional(),
+      fileName: z.string().min(1).optional(),
+      bytes: z.number().int().nonnegative().optional(),
+      mimeType: z.string().min(1).optional(),
+    })
+    .optional(),
 });
 
 export type IngestSource = z.infer<typeof ingestSourceSchema>;
