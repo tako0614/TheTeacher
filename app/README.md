@@ -1,6 +1,10 @@
 # Tauri app (SolidJS + Tailwind)
 
-SolidJS + Tailwind + Tauri client for the AI-first study experience described in `PLAN.md`.
+SolidJS + Tailwind + Tauri client for the AI-first study experience described in `PLAN.md`. Tauri is used as a thin desktop wrapper; the main runtime is the regular Vite (Solid) app so you can dev/run it just like a web front-end.
+
+## Safety & media handling
+- 画像はLLMに直接渡してOCR/文字起こし・要約を行う方針です（LLMのVision/Audio機能を活用）。
+音声とかはそれ用のモデルを使うことになると思います。
 
 ## Milestones
 - Bootstrap Vite + Tauri scaffold with strict TypeScript config and Tailwind.

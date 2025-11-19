@@ -23,10 +23,8 @@ import {
 } from "@theteacher/shared";
 
 import {
-  bootstrapJobFromRequest,
   materialIngestPresets,
   resolveLibraryConfig,
-  sampleLibraryEntries,
 } from "../lib/materials";
 
 import {
@@ -38,6 +36,7 @@ import {
 import {
   createContent,
   createLearning,
+  createMaterial,
   generateFromMaterial,
   ingestMaterial,
   createSession,
@@ -900,7 +899,7 @@ const LearningDetailSurface: Component = () => {
                 when={ingestQueue().length > 0}
                 fallback={
                   <div class="rounded-md border border-dashed border-slate-200 bg-slate-50 px-3 py-2">
-                    追加した教材をここで管理します（Tauriコマンド接続前のスタブ）。
+                    追加した教材をここで管理します。バックエンドへの保存と抽出が完了するとステップが更新されます。
                   </div>
                 }
               >
@@ -954,8 +953,8 @@ const LearningDetailSurface: Component = () => {
             </p>
             <div class="mt-2 space-y-2 text-sm text-slate-700">
               <select
-                value={selectedPreset()}
-                onChange={(e) => setSelectedPreset(e.currentTarget.value)}
+                value={ingestPresetId()}
+                onChange={(e) => setIngestPresetId(e.currentTarget.value)}
                 class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-indigo-300 focus:outline-none focus:ring-2 focus:ring-indigo-100"
               >
                 <For each={materialIngestPresets}>
@@ -965,7 +964,7 @@ const LearningDetailSurface: Component = () => {
                 </For>
               </select>
               <p class="text-xs text-slate-500">
-                AI API接続前はプリセットをUI上で選択できるだけにしています。Tauri fetch plugin経由でCORS回避しつつAPIを叩く想定です。
+                選択したプリセットは生成APIへ送信され、system prompt / user template として利用されます。
               </p>
             </div>
           </div>
@@ -1017,23 +1016,145 @@ const LearningDetailSurface: Component = () => {
 
 
 const PracticeSurface: Component = () => {
+  type Question = {
+    id: string;
+    generatedContentId: string;
+    title: string;
+    prompt: string;
+    expected?: string;
+    hint?: string;
+  };
+
   const [mode, setMode] = createSignal<"handwriting" | "text">("text");
-  const chatLog = [
-    {
-      role: "assistant",
-      content:
-        "進捗を確認しました。今回は頂点の求め方を確認しましょう。まずこの問題を解いてください。",
-    },
-    {
-      role: "user",
-      content: "完成平方したので頂点は (-2, 1) になりました。",
-    },
-    {
-      role: "assistant",
-      content:
-        "正解です。軸は x = -2、最小値は 1 です。次はグラフの開き方を説明してください。",
-    },
-  ];
+  const [selectedLearningId, setSelectedLearningId] = createSignal<string>();
+  const [questionIndex, setQuestionIndex] = createSignal(0);
+  const [answer, setAnswer] = createSignal("");
+  const [grading, setGrading] = createSignal<{ score: number; isCorrect: boolean; comment: string } | null>(
+    null,
+  );
+  const [isSubmitting, setIsSubmitting] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+
+  const [learnings] = createResource(() => true, () => fetchLearnings({ limit: 50 }));
+  createEffect(() => {
+    const list = learnings();
+    if (list?.length && !selectedLearningId()) {
+      setSelectedLearningId(list[0].id);
+    }
+  });
+
+  const [generatedContents, { refetch: refetchContents }] = createResource(
+    () => selectedLearningId(),
+    (id) => (id ? fetchContents(id).then((res) => res.items) : []),
+  );
+  const [sessions, { refetch: refetchSessions }] = createResource(
+    () => selectedLearningId(),
+    (id) => (id ? fetchSessions(id).then((res) => res.items) : []),
+  );
+
+  const questions = createMemo<Question[]>(() => {
+    const contents = generatedContents() ?? [];
+    const extracted: Question[] = [];
+    for (const content of contents) {
+      const payload = content.content as Record<string, unknown>;
+      if (content.type === "practice" && Array.isArray(payload.items)) {
+        for (const item of payload.items as Array<Record<string, string>>) {
+          extracted.push({
+            id: crypto.randomUUID(),
+            generatedContentId: content.id,
+            title: payload.title ? String(payload.title) : "練習問題",
+            prompt: item.prompt ?? item.question ?? "問題文が取得できませんでした。",
+            expected: item.expectedAnswer ?? item.answer,
+            hint: item.hint,
+          });
+        }
+      } else if (content.type === "qa" && Array.isArray(payload.pairs)) {
+        for (const pair of payload.pairs as Array<Record<string, string>>) {
+          extracted.push({
+            id: crypto.randomUUID(),
+            generatedContentId: content.id,
+            title: payload.title ? String(payload.title) : "一問一答",
+            prompt: pair.question ?? "質問が取得できませんでした。",
+            expected: pair.answer,
+            hint: pair.rationale,
+          });
+        }
+      }
+    }
+    return extracted;
+  });
+
+  const currentQuestion = createMemo(() => questions()[questionIndex()] ?? null);
+
+  const computeScore = (expected: string, input: string) => {
+    if (!expected) return 0;
+    const normalize = (text: string) =>
+      text
+        .toLowerCase()
+        .replace(/[^\p{Letter}\p{Number}\s]/gu, " ")
+        .split(/\s+/)
+        .filter(Boolean);
+    const expectedTokens = normalize(expected);
+    const answerTokens = normalize(input);
+    if (expectedTokens.length === 0 || answerTokens.length === 0) return 0;
+    const overlap = answerTokens.filter((token) => expectedTokens.includes(token)).length;
+    return Math.min(1, overlap / expectedTokens.length);
+  };
+
+  const moveQuestion = (delta: number) => {
+    const total = questions().length;
+    if (total === 0) return;
+    setQuestionIndex((index) => {
+      const next = index + delta;
+      if (next < 0) return 0;
+      if (next >= total) return total - 1;
+      return next;
+    });
+    setAnswer("");
+    setGrading(null);
+  };
+
+  const handleSubmit = async () => {
+    setError(null);
+    const question = currentQuestion();
+    const learningId = selectedLearningId();
+    if (!question || !learningId) return;
+    const trimmed = answer().trim();
+    if (!trimmed) return;
+
+    const score = computeScore(question.expected ?? "", trimmed);
+    const isCorrect = score >= 0.6;
+    const comment =
+      question.expected && score < 0.3
+        ? "キーワードがほとんど一致していません。ヒントを参考に解き直してください。"
+        : score >= 0.6
+          ? "概ね正解です。"
+          : "一部不足があります。もう一度確認しましょう。";
+
+    setIsSubmitting(true);
+    try {
+      await createSession({
+        learningId,
+        generatedContentId: question.generatedContentId,
+        questionRef: {
+          title: question.title,
+          prompt: question.prompt,
+          expected: question.expected,
+        },
+        answerText: trimmed,
+        isCorrect,
+        feedback: { comment, hint: question.hint },
+        score,
+      });
+      setGrading({ score, isCorrect, comment });
+      setAnswer("");
+      await Promise.all([refetchSessions(), refetchContents()]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "採点に失敗しました。");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
 
   return (
     <section class="space-y-6">
@@ -1044,10 +1165,25 @@ const PracticeSurface: Component = () => {
           </p>
           <h1 class="text-2xl font-bold text-slate-900">手書き入力とテキスト入力を切り替える演習モード</h1>
           <p class="text-sm text-slate-600">
-            左に問題、右に回答とAIフィードバックログを並べています。モードトグルで入力方法を切り替えられます。
+            バックエンドに保存された生成コンテンツ（練習問題・一問一答）を直接出題し、採点結果を PracticeSession として保存します。
           </p>
         </div>
         <div class="flex flex-wrap gap-2">
+          <select
+            value={selectedLearningId() ?? ""}
+            onChange={(event) => {
+              setSelectedLearningId(event.currentTarget.value);
+              setQuestionIndex(0);
+              setGrading(null);
+            }}
+            class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-800"
+          >
+            <Show when={(learnings() ?? []).length > 0} fallback={<option value="">学習未選択</option>}>
+              <For each={learnings() ?? []}>
+                {(learning) => <option value={learning.id}>{learning.title}</option>}
+              </For>
+            </Show>
+          </select>
           <button
             class={`rounded-lg px-3 py-2 text-xs font-semibold transition ${
               mode() === "handwriting"
@@ -1069,107 +1205,140 @@ const PracticeSurface: Component = () => {
             テキスト入力
           </button>
         </div>
-      </header>
+    </header>
 
-      <div class="grid gap-4 md:grid-cols-[1.2fr_1fr]">
-        <div class="space-y-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-          <div class="flex items-center justify-between">
-            <div>
-              <p class="text-xs uppercase text-slate-500">問題 2 / 5</p>
-              <h2 class="text-lg font-semibold text-slate-900">
-                二次関数 f(x)=x^2+4x+5 の頂点と最小値を求めよ
-              </h2>
-              <p class="text-sm text-slate-600">
-                ヒント: 平方完成を用いて軸と頂点を読み取ってください。
+      <Show
+        when={questions().length > 0}
+        fallback={
+          <div class="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-sm text-slate-700">
+            練習用の生成コンテンツがまだありません。学習詳細で練習問題または一問一答を生成してから、ここで解答してください。
+          </div>
+        }
+      >
+        <div class="grid gap-4 md:grid-cols-[1.2fr_1fr]">
+          <div class="space-y-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <div class="flex items-center justify-between">
+              <div>
+                <p class="text-xs uppercase text-slate-500">
+                  問題 {questionIndex() + 1} / {questions().length}
+                </p>
+                <h2 class="text-lg font-semibold text-slate-900">
+                  {currentQuestion()?.prompt ?? "問題が読み込めませんでした"}
+                </h2>
+                <p class="text-sm text-slate-600">
+                  ヒント: {currentQuestion()?.hint ?? "生成コンテンツから抽出した問題です。"}
+                </p>
+              </div>
+              <div class="flex gap-2">
+                <button
+                  class="rounded-md border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                  onClick={() => moveQuestion(-1)}
+                  disabled={questionIndex() === 0}
+                >
+                  前の問題
+                </button>
+                <button
+                  class="rounded-md border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                  onClick={() => moveQuestion(1)}
+                  disabled={questionIndex() >= questions().length - 1}
+                >
+                  次の問題
+                </button>
+              </div>
+            </div>
+
+            <div class="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-sm text-slate-600">
+              <p class="font-semibold text-slate-800">関連情報</p>
+              <p class="mt-2">
+                練習問題の元になった生成コンテンツ ID: {currentQuestion()?.generatedContentId}
+                。解答のみ入力して送信してください。
               </p>
             </div>
-            <div class="flex gap-2">
-              <button class="rounded-md border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">
-                前の問題
-              </button>
-              <button class="rounded-md border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">
-                次の問題
-              </button>
+          </div>
+
+          <div class="space-y-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <div class="space-y-2">
+              <p class="text-xs font-semibold uppercase text-slate-500">
+                回答
+              </p>
+              <textarea
+                class="h-28 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-indigo-300 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+                placeholder={
+                  mode() === "handwriting"
+                    ? "紙に解いた結果を入力してください。"
+                    : "回答を直接入力してください。キーワードを簡潔に含めてください。"
+                }
+                value={answer()}
+                onInput={(e) => setAnswer(e.currentTarget.value)}
+              />
+              <div class="flex gap-2 text-xs text-slate-600">
+                <button
+                  class="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-70"
+                  onClick={handleSubmit}
+                  disabled={isSubmitting() || !answer().trim()}
+                >
+                  {isSubmitting() ? "採点中..." : "採点して送信"}
+                </button>
+                <button
+                  class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
+                  onClick={() => setAnswer("")}
+                >
+                  クリア
+                </button>
+              </div>
+              <Show when={error()}>
+                {(err) => <p class="text-xs text-rose-600">{err()}</p>}
+              </Show>
             </div>
-          </div>
 
-          <div class="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-sm text-slate-600">
-            <p class="font-semibold text-slate-800">図・数式プレビュー</p>
-            <p class="mt-2">
-              数式や図形がここにレンダリングされます。手書きモードの場合は紙の解答を参照しながら「解答のみ」を送信します。
-            </p>
-          </div>
+            <div class="space-y-2">
+              <p class="text-xs font-semibold uppercase text-slate-500">
+                フィードバック
+              </p>
+              <div class="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-800">
+                <Show
+                  when={grading()}
+                  fallback={<p>採点するとここにスコアとコメントが表示されます。</p>}
+                >
+                  {(result) => (
+                    <>
+                      <p>
+                        正答判定: {result().isCorrect ? "正解" : "部分正解"} / score{" "}
+                        {(result().score * 100).toFixed(0)}%
+                      </p>
+                      <p class="text-xs text-slate-600">{result().comment}</p>
+                    </>
+                  )}
+                </Show>
+              </div>
+            </div>
 
-          <div>
-            <p class="text-xs font-semibold uppercase text-slate-500">
-              関連資料
-            </p>
-            <div class="mt-2 flex flex-wrap gap-2 text-xs">
-              <span class="rounded-full bg-slate-100 px-2 py-1">動画: 平方完成</span>
-              <span class="rounded-full bg-slate-100 px-2 py-1">
-                ノート: 公式まとめ
-              </span>
+            <div class="space-y-2">
+              <p class="text-xs font-semibold uppercase text-slate-500">
+                演習履歴
+              </p>
+              <div class="space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm">
+                <For each={sessions() ?? []}>
+                  {(session) => (
+                    <div class="rounded-md bg-white p-2 text-slate-800">
+                      <p class="text-xs font-semibold uppercase text-slate-500">
+                        {session.questionRef?.title ?? "演習"}
+                      </p>
+                      <p class="mt-1 text-sm">{session.questionRef?.prompt}</p>
+                      <p class="text-xs text-slate-500">
+                        あなた: {session.answerText} / score {session.score ? (session.score * 100).toFixed(0) : "-"}%
+                      </p>
+                    </div>
+                  )}
+                </For>
+                <Show when={(sessions() ?? []).length === 0}>
+                  <p class="text-xs text-slate-500">まだ演習ログがありません。</p>
+                </Show>
+              </div>
             </div>
           </div>
         </div>
-
-        <div class="space-y-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-          <div class="space-y-2">
-            <p class="text-xs font-semibold uppercase text-slate-500">
-              回答
-            </p>
-            <textarea
-              class="h-28 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-indigo-300 focus:outline-none focus:ring-2 focus:ring-indigo-100"
-              placeholder={
-                mode() === "handwriting"
-                  ? "紙に解いた結果を入力してください。例: 頂点 (-2,1)、最小値 1。"
-                  : "回答を直接入力してください。例: 平方完成すると (x+2)^2 +1 なので軸 x=-2, 頂点(-2,1)。"
-              }
-            />
-            <div class="flex gap-2 text-xs text-slate-600">
-              <button class="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500">
-                採点して送信
-              </button>
-              <button class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50">
-                類題を生成
-              </button>
-            </div>
-          </div>
-
-          <div class="space-y-2">
-            <p class="text-xs font-semibold uppercase text-slate-500">
-              フィードバック
-            </p>
-            <div class="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-800">
-              正答率 80% / 部分点あり。平方完成の途中式も残すと減点を防げます。
-            </div>
-          </div>
-
-          <div class="space-y-2">
-            <p class="text-xs font-semibold uppercase text-slate-500">
-              AIとの対話ログ
-            </p>
-            <div class="space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm">
-              <For each={chatLog}>
-                {(msg) => (
-                  <div
-                    class={`rounded-md p-2 ${
-                      msg.role === "assistant"
-                        ? "bg-white text-slate-800"
-                        : "bg-indigo-50 text-indigo-900"
-                    }`}
-                  >
-                    <span class="text-xs font-semibold uppercase">
-                      {msg.role === "assistant" ? "AI" : "You"}
-                    </span>
-                    <p class="mt-1">{msg.content}</p>
-                  </div>
-                )}
-              </For>
-            </div>
-          </div>
-        </div>
-      </div>
+      </Show>
     </section>
   );
 };
@@ -1578,126 +1747,257 @@ const MaterialSettingsSurface: Component = () => (
   </section>
 );
 
-const NewLearningSurface: Component = () => (
-  <section class="space-y-6">
-    <header class="space-y-2">
-      <p class="text-xs font-semibold uppercase tracking-wide text-indigo-600">
-        過去教材から新しい学習作成
-      </p>
-      <h1 class="text-2xl font-bold text-slate-900">
-        過去の教材抽出結果を取捨選択し、新規学習を組み立てる
-      </h1>
-      <p class="text-sm text-slate-600">
-        左のステップで教材を選び、中央で抽出結果を確認し、右でプレビューとメタデータを編集します。
-      </p>
-    </header>
+const NewLearningSurface: Component = () => {
+  const [sourceLearningId, setSourceLearningId] = createSignal<string>();
+  const [selectedMaterialIds, setSelectedMaterialIds] = createSignal<string[]>([]);
+  const [selectedContentIds, setSelectedContentIds] = createSignal<string[]>([]);
+  const [title, setTitle] = createSignal("");
+  const [tags, setTags] = createSignal("");
+  const [status, setStatus] = createSignal<string | null>(null);
+  const [isCreating, setIsCreating] = createSignal(false);
+  const summarizeForDisplay = (value: unknown) =>
+    (typeof value === "string" ? value : JSON.stringify(value ?? {}))
+      .replace(/\s+/g, " ")
+      .slice(0, 80);
 
-    <div class="grid gap-4 md:grid-cols-[0.9fr_1fr_1fr]">
-      <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-        <p class="text-xs font-semibold uppercase text-slate-500">
-          ① 抽出元を選択
-        </p>
-        <div class="mt-2 space-y-2 text-sm text-slate-800">
-          <label class="flex items-center gap-2">
-            <input type="radio" name="learning" checked />
-            高校数学I_二次関数_第1回
-          </label>
-          <label class="flex items-center gap-2">
-            <input type="radio" name="learning" />
-            英語長文_時制の一致
-          </label>
-          <label class="flex items-center gap-2">
-            <input type="radio" name="learning" />
-            物理_電磁気_公式暗記リスト
-          </label>
-        </div>
-      </div>
+  const [learnings] = createResource(() => true, () => fetchLearnings({ limit: 50 }));
+  createEffect(() => {
+    const list = learnings();
+    if (list?.length && !sourceLearningId()) {
+      setSourceLearningId(list[0].id);
+    }
+  });
 
-      <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-        <p class="text-xs font-semibold uppercase text-slate-500">
-          ② 抽出結果の確認
-        </p>
-        <div class="mt-2 space-y-2 text-sm text-slate-800">
-          <label class="flex items-start gap-2">
-            <input type="checkbox" checked />
-            <span>
-              頂点と軸の求め方まとめ（短答3問提案）
-              <span class="block text-xs text-slate-600">
-                生成コンテンツ: Q&A + 練習問題
-              </span>
-            </span>
-          </label>
-          <label class="flex items-start gap-2">
-            <input type="checkbox" checked />
-            <span>
-              グラフ形状の説明スクリプト
-              <span class="block text-xs text-slate-600">
-                生成コンテンツ: ポッドキャスト用台本
-              </span>
-            </span>
-          </label>
-          <label class="flex items-start gap-2">
-            <input type="checkbox" />
-            <span>
-              判別式と解の個数に関する問題セット
-              <span class="block text-xs text-slate-600">
-                生成コンテンツ: 練習問題
-              </span>
-            </span>
-          </label>
-        </div>
-        <div class="mt-3 flex gap-2">
-          <button class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">
-            再生成
-          </button>
-          <button class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">
-            抽出ログ
-          </button>
-        </div>
-      </div>
+  const [materials] = createResource(
+    () => sourceLearningId(),
+    (id) => (id ? fetchMaterials(id).then((res) => res.items) : []),
+  );
+  const [generatedContents] = createResource(
+    () => sourceLearningId(),
+    (id) => (id ? fetchContents(id).then((res) => res.items) : []),
+  );
 
-      <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-        <p class="text-xs font-semibold uppercase text-slate-500">
-          ③ 新規学習のプレビュー
+  const toggleSelection = (ids: string[], setIds: (value: string[]) => void, id: string) => {
+    if (ids.includes(id)) {
+      setIds(ids.filter((item) => item !== id));
+    } else {
+      setIds([...ids, id]);
+    }
+  };
+
+  const handleCreate = async () => {
+    const source = learnings()?.find((learning) => learning.id === sourceLearningId());
+    if (!source) {
+      setStatus("抽出元の学習を選択してください。");
+      return;
+    }
+    const normalizedTitle = title().trim() || `${source.title}_派生`;
+    const normalizedTags = tags()
+      .split(",")
+      .map((tag) => tag.trim())
+      .filter(Boolean);
+
+    setIsCreating(true);
+    setStatus(null);
+    try {
+      const newLearning = await createLearning({
+        title: normalizedTitle,
+        subject: source.subject,
+        tags: normalizedTags.length > 0 ? normalizedTags : source.tags,
+      });
+
+      const materialList =
+        materials()
+          ?.filter((mat) => selectedMaterialIds().includes(mat.id))
+          .map(({ id: _id, learningId: _learning, createdAt: _c, updatedAt: _u, ...rest }) => rest) ?? [];
+      const contentList =
+        generatedContents()
+          ?.filter((content) => selectedContentIds().includes(content.id))
+          .map(({ id: _id, learningId: _learning, createdAt: _c, ...rest }) => rest) ?? [];
+
+      await Promise.all(
+        materialList.map((mat) =>
+          createMaterial({
+            ...mat,
+            learningId: newLearning.id,
+          }),
+        ),
+      );
+      await Promise.all(
+        contentList.map((content) =>
+          createContent({
+            ...content,
+            learningId: newLearning.id,
+          }),
+        ),
+      );
+
+      setStatus(
+        `「${normalizedTitle}」を作成しました（教材 ${materialList.length} 件 / 生成コンテンツ ${contentList.length} 件をコピー）。`,
+      );
+      setSelectedMaterialIds([]);
+      setSelectedContentIds([]);
+    } catch (error) {
+      setStatus(
+        error instanceof Error ? `作成に失敗しました: ${error.message}` : "作成に失敗しました。",
+      );
+    } finally {
+      setIsCreating(false);
+    }
+  };
+
+  return (
+    <section class="space-y-6">
+      <header class="space-y-2">
+        <p class="text-xs font-semibold uppercase tracking-wide text-indigo-600">
+          過去教材から新しい学習作成
         </p>
-        <div class="mt-2 space-y-2 text-sm text-slate-800">
-          <label class="flex flex-col gap-1">
-            <span class="text-xs font-semibold text-slate-600">タイトル</span>
-            <input
-              class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
-              value="高校数学I_二次関数_復習セット"
-            />
-          </label>
-          <label class="flex flex-col gap-1">
-            <span class="text-xs font-semibold text-slate-600">タグ</span>
-            <input
-              class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
-              value="二次関数, 基礎, 復習"
-            />
-          </label>
-          <div class="rounded-lg bg-slate-50 px-3 py-2">
-            <p class="text-xs font-semibold uppercase text-slate-500">
-              生成されるコンテンツ
-            </p>
-            <ul class="mt-1 list-disc space-y-1 pl-5 text-sm text-slate-700">
-              <li>Q&A 3問</li>
-              <li>練習問題 5問</li>
-              <li>ポッドキャスト台本（約3分）</li>
-            </ul>
+        <h1 class="text-2xl font-bold text-slate-900">
+          既存の教材・生成物を選んで新しいLearningとして保存
+        </h1>
+        <p class="text-sm text-slate-600">
+          抽出元のLearningを選び、コピーしたい教材と生成コンテンツにチェックを入れて新規Learningを作成します。
+        </p>
+      </header>
+
+      <div class="grid gap-4 md:grid-cols-[0.9fr_1fr_1fr]">
+        <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+          <p class="text-xs font-semibold uppercase text-slate-500">
+            ① 抽出元を選択
+          </p>
+          <div class="mt-2 space-y-2 text-sm text-slate-800">
+            <For each={learnings() ?? []}>
+              {(learning) => (
+                <label class="flex items-center gap-2">
+                  <input
+                    type="radio"
+                    name="learning"
+                    checked={learning.id === sourceLearningId()}
+                    onChange={() => setSourceLearningId(learning.id)}
+                  />
+                  <div>
+                    <p class="font-semibold text-slate-900">{learning.title}</p>
+                    <p class="text-xs text-slate-600">
+                      {subjectLabel(learning.subject)} / {learning.tags?.join(", ")}
+                    </p>
+                  </div>
+                </label>
+              )}
+            </For>
+            <Show when={!learnings() || learnings()?.length === 0}>
+              <p class="text-xs text-slate-500">抽出元となるLearningがありません。</p>
+            </Show>
           </div>
         </div>
-        <div class="mt-3 flex gap-2">
-          <button class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">
-            下書き保存
-          </button>
-          <button class="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500">
-            学習を作成
-          </button>
+
+        <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+          <p class="text-xs font-semibold uppercase text-slate-500">
+            ② コピーする教材と生成物
+          </p>
+          <div class="mt-2 space-y-2 text-sm text-slate-800">
+            <p class="text-xs font-semibold text-slate-600">教材</p>
+            <For each={materials() ?? []}>
+              {(material) => (
+                <label class="flex items-start gap-2">
+                  <input
+                    type="checkbox"
+                    checked={selectedMaterialIds().includes(material.id)}
+                    onChange={() =>
+                      toggleSelection(selectedMaterialIds(), setSelectedMaterialIds, material.id)
+                    }
+                  />
+                  <span>
+                    {material.sourcePath ?? material.type.toUpperCase()}
+                    <span class="block text-xs text-slate-600">
+                      {material.rawContent ? summarizeForDisplay(material.rawContent) : material.type}
+                    </span>
+                  </span>
+                </label>
+              )}
+            </For>
+            <Show when={(materials() ?? []).length === 0}>
+              <p class="text-xs text-slate-500">教材がありません。</p>
+            </Show>
+            <p class="pt-2 text-xs font-semibold text-slate-600">生成コンテンツ</p>
+            <For each={generatedContents() ?? []}>
+              {(content) => (
+                <label class="flex items-start gap-2">
+                  <input
+                    type="checkbox"
+                    checked={selectedContentIds().includes(content.id)}
+                    onChange={() =>
+                      toggleSelection(selectedContentIds(), setSelectedContentIds, content.id)
+                    }
+                  />
+                  <span>
+                    {generatedTypeLabels[content.type] ?? content.type}
+                    <span class="block text-xs text-slate-600">
+                      {summarizeForDisplay(content.content)}
+                    </span>
+                  </span>
+                </label>
+              )}
+            </For>
+            <Show when={(generatedContents() ?? []).length === 0}>
+              <p class="text-xs text-slate-500">生成コンテンツがありません。</p>
+            </Show>
+          </div>
+        </div>
+
+        <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+          <p class="text-xs font-semibold uppercase text-slate-500">
+            ③ 新規学習のプレビュー
+          </p>
+          <div class="mt-2 space-y-2 text-sm text-slate-800">
+            <label class="flex flex-col gap-1">
+              <span class="text-xs font-semibold text-slate-600">タイトル</span>
+              <input
+                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+                value={title()}
+                onInput={(e) => setTitle(e.currentTarget.value)}
+                placeholder="例: 〇〇の復習セット"
+              />
+            </label>
+            <label class="flex flex-col gap-1">
+              <span class="text-xs font-semibold text-slate-600">タグ (カンマ区切り)</span>
+              <input
+                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+                value={tags()}
+                onInput={(e) => setTags(e.currentTarget.value)}
+                placeholder="二次関数, 復習, 小テスト"
+              />
+            </label>
+            <div class="rounded-lg bg-slate-50 px-3 py-2">
+              <p class="text-xs font-semibold uppercase text-slate-500">
+                コピー対象の概要
+              </p>
+              <ul class="mt-1 list-disc space-y-1 pl-5 text-sm text-slate-700">
+                <li>教材 {selectedMaterialIds().length} 件</li>
+                <li>生成コンテンツ {selectedContentIds().length} 件</li>
+              </ul>
+            </div>
+          </div>
+          <div class="mt-3 flex gap-2">
+            <button
+              class="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-70"
+              onClick={handleCreate}
+              disabled={isCreating() || !sourceLearningId()}
+            >
+              {isCreating() ? "作成中..." : "学習を作成"}
+            </button>
+          </div>
+          <Show when={status()}>
+            {(text) => (
+              <p class="mt-2 text-xs text-slate-700">
+                {text()}
+              </p>
+            )}
+          </Show>
         </div>
       </div>
-    </div>
-  </section>
-);
+    </section>
+  );
+};
 
 const AppSettingsSurface: Component = () => {
   const settings = useSettings();

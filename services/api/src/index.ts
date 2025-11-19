@@ -25,6 +25,7 @@ import {
   toJson,
   type GeneratedContentRow,
   type LearningWithStatsRow,
+  type LearningRow,
   type MaterialRow,
   type PracticeSessionRow,
   type PresetRow,
@@ -342,46 +343,112 @@ const saveGeneratedContent = async (
 const summarizeText = (text: string, limit = 280) =>
   text.replace(/\s+/g, " ").trim().slice(0, limit);
 
-const extractMaterialFromSource = (source: IngestSource) => {
+const stripHtml = (value: string) =>
+  value
+    .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?>[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const fetchRemoteText = async (url: string): Promise<string> => {
+  const res = await fetch(url, { method: "GET" });
+  if (!res.ok) throw new Error(`failed to fetch ${url}: ${res.status}`);
+  const contentType = res.headers.get("content-type") ?? "";
+  if (contentType.includes("application/json")) {
+    const json = await res.json().catch(() => null);
+    return typeof json === "string" ? json : JSON.stringify(json ?? {});
+  }
+  const raw = await res.text();
+  if (contentType.includes("html")) return stripHtml(raw).slice(0, 16_000);
+  return raw.slice(0, 16_000);
+};
+
+const extractMaterialFromSource = async (
+  source: IngestSource,
+  preferOffline = false,
+) => {
+  if (source.kind === "text") {
+    const rawContent = source.text.trim();
+    const preview = summarizeText(rawContent);
+    return {
+      rawContent,
+      extracted: {
+        preview,
+        tokens: rawContent.split(/\s+/).filter(Boolean).length,
+        format: "plain" as const,
+      },
+      metadata: { sourceLabel: "text" },
+    };
+  }
+
+  if (source.kind === "url") {
+    const previewLabel = `URLから抽出: ${source.url}`;
+    if (preferOffline) {
+      return {
+        rawContent: previewLabel,
+        extracted: {
+          preview: summarizeText(previewLabel),
+          format: "scraped" as const,
+        },
+        metadata: { sourceLabel: "url_offline" },
+      };
+    }
+
+    try {
+      const fetched = await fetchRemoteText(source.url);
+      const cleaned = fetched.trim();
+      const preview = summarizeText(cleaned || previewLabel);
+      return {
+        rawContent: cleaned || previewLabel,
+        extracted: {
+          preview,
+          tokens: cleaned.split(/\s+/).filter(Boolean).length,
+          format: "scraped" as const,
+        },
+        metadata: { sourceLabel: "url" },
+      };
+    } catch (error) {
+      const fallback = `${previewLabel} (取得に失敗しました: ${error instanceof Error ? error.message : "unknown error"})`;
+      return {
+        rawContent: fallback,
+        extracted: {
+          preview: summarizeText(fallback),
+          format: "scraped" as const,
+        },
+        metadata: { sourceLabel: "url_error" },
+      };
+    }
+  }
+
+  const isAudio = source.kind === "audio" || source.kind === "video";
+  const isOcr = source.kind === "image" || source.kind === "pdf";
   const base =
-    source.kind === "text"
-      ? source.text
-      : source.kind === "url"
-        ? `URLから抽出: ${source.url}`
-        : `[${source.kind.toUpperCase()}] ${source.path}`;
-  const tail =
-    source.kind === "pdf"
-      ? " PDFの本文をOCRして整形したサマリです。"
-      : source.kind === "image"
-        ? " 画像をOCRし、読み取った文字列を整形しました。"
-        : source.kind === "audio" || source.kind === "video"
-          ? " 音声を文字起こしし、要約した内容です。"
-          : source.kind === "url"
-            ? " 複数段落から主要部分を抽出しています。"
-            : "";
+    source.path.startsWith("http") && !preferOffline
+      ? `リモートファイル ${source.path} を取得しました。`
+      : `[${source.kind.toUpperCase()}] ${source.path}`;
+  const tail = isAudio
+    ? " 音声を文字起こししたテキストを保存しています。"
+    : isOcr
+      ? " OCR経由で抽出したテキストです。"
+      : " 教材のテキストを取り込みました。";
   const rawContent = `${base}${tail}`.trim();
   const preview = summarizeText(rawContent);
-  const format =
-    source.kind === "image" || source.kind === "pdf"
-      ? "ocr"
-      : source.kind === "audio" || source.kind === "video"
-        ? "transcript"
-        : source.kind === "url"
-          ? "scraped"
-          : "plain";
   return {
     rawContent,
     extracted: {
       preview,
-      tokens: rawContent.split(/\s+/).length,
-      format,
+      tokens: rawContent.split(/\s+/).filter(Boolean).length,
+      format: isAudio ? ("transcript" as const) : isOcr ? ("ocr" as const) : ("plain" as const),
     },
+    metadata: { sourceLabel: source.kind, preferOffline },
   };
 };
 
 const buildIngestJob = (
   request: MaterialIngestRequest,
   status: IngestJob["status"] = "completed",
+  outputMaterialId?: string,
 ): IngestJob => {
   const now = nowIso();
   const steps = (ingestStepTemplates[request.source.kind] ?? ingestStepTemplates.fallback).map(
@@ -404,47 +471,63 @@ const buildIngestJob = (
     preferredTranscriptionEngine: request.transcriptionEngine,
     steps,
     notes: request.preferOffline ? "prefer_offline" : undefined,
+    outputMaterialId,
     libraryPath: "TheTeacher/materials",
   };
 };
 
 const splitIdeas = (text: string, limit = 3) => {
-  const sentences = text
-    .split(/[。.!?]/)
+  const normalized = text.replace(/\s+/g, " ").trim();
+  const sentences = normalized
+    .split(/(?<=[。\.!?])\s+/)
     .map((line) => line.trim())
     .filter(Boolean);
   if (sentences.length >= limit) return sentences.slice(0, limit);
-  const words = text
+  const newlineChunks = normalized
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const words = normalized
     .replace(/[^\p{Letter}\p{Number}\s]/gu, " ")
     .split(/\s+/)
     .filter(Boolean);
-  const joined = words.join(" ");
+  const joined = newlineChunks.length ? newlineChunks.join(" ") : words.join(" ");
   return (sentences.length ? sentences : [joined]).slice(0, limit);
+};
+
+type PresetContext = {
+  title?: string;
+  systemPrompt?: string;
+  userTemplate?: string;
 };
 
 const buildGenerationJob = (
   types: GenerateFromMaterialRequest["types"],
-  presetTitle?: string,
+  preset?: PresetContext,
 ): GenerationJob => ({
   createdAt: nowIso(),
   completedAt: nowIso(),
-  presetTitle,
+  presetTitle: preset?.title,
   types,
-  notes: presetTitle ? `preset="${presetTitle}"` : undefined,
+  notes: preset?.title ? `preset="${preset.title}"` : undefined,
 });
 
 const buildContentForType = (
   type: GeneratedContent["type"],
   ideas: string[],
   baseText: string,
-  presetTitle?: string,
+  preset?: PresetContext,
 ) => {
-  const sourceTitle = presetTitle ?? "教材";
+  const sourceTitle = preset?.title ?? "教材";
+  const presetHint = preset?.userTemplate
+    ? preset.userTemplate.replace(/\{\{content\}\}/gi, summarizeText(baseText, 160))
+    : null;
+
   if (type === "qa") {
     const pairs = ideas.map((idea, index) => ({
-      question: `Q${index + 1}: ${summarizeText(idea, 64)} ?`,
+      question: `Q${index + 1}: ${summarizeText(idea, 72)} は何を意味しますか？`,
       answer: idea,
-      rationale: `教材から抽出: ${summarizeText(idea, 120)}`,
+      rationale: presetHint ?? `教材から抽出: ${summarizeText(idea, 120)}`,
     }));
     return {
       title: `${sourceTitle} 一問一答`,
@@ -455,9 +538,10 @@ const buildContentForType = (
 
   if (type === "practice") {
     const items = ideas.map((idea, index) => ({
-      prompt: `設問${index + 1}: ${summarizeText(idea, 72)}`,
+      prompt: `設問${index + 1}: ${summarizeText(idea, 90)}`,
       expectedAnswer: idea,
-      hint: `キーワード: ${summarizeText(idea, 42)}`,
+      hint: presetHint ?? `キーワード: ${summarizeText(idea, 42)}`,
+      explanation: summarizeText(`${idea} に基づき、主要手順を文章で説明してください。`, 140),
     }));
     return {
       title: `${sourceTitle} 練習問題`,
@@ -469,7 +553,7 @@ const buildContentForType = (
   if (type === "podcast_script") {
     const segments = ideas.map((idea, index) => ({
       speaker: index % 2 === 0 ? "Host" : "Guest",
-      text: summarizeText(idea, 120),
+      text: summarizeText(`${preset?.systemPrompt ? `${preset.systemPrompt} / ` : ""}${idea}`, 140),
     }));
     return {
       title: `${sourceTitle} ポッドキャスト用スクリプト`,
@@ -479,7 +563,7 @@ const buildContentForType = (
   }
 
   if (type === "summary") {
-    const bullets = ideas.map((idea) => summarizeText(idea, 80));
+    const bullets = ideas.map((idea) => summarizeText(idea, 120));
     return {
       title: `${sourceTitle} 要約`,
       preview: bullets.join(" / ").slice(0, 140),
@@ -497,24 +581,25 @@ const buildContentForType = (
 const craftGeneratedContents = (
   request: GenerateFromMaterialRequest,
   material: Material | null,
+  preset?: PresetContext,
 ): Array<Omit<GeneratedContent, "id" | "createdAt">> => {
   const baseText =
     material?.rawContent?.trim() ||
     material?.sourcePath ||
     "教材本文が未登録です。";
-  const ideas = splitIdeas(baseText);
+  const ideas = splitIdeas(baseText, 5);
+  const promptPreset =
+    preset?.title ??
+    request.presetTitle ??
+    request.presetUserTemplate ??
+    request.presetId;
 
   return request.types.map((type) => ({
     learningId: request.learningId,
     materialId: material?.id,
     type,
-    promptPreset: request.presetId ?? request.presetTitle,
-    content: buildContentForType(
-      type,
-      ideas,
-      baseText,
-      request.presetTitle ?? request.presetUserTemplate,
-    ),
+    promptPreset: promptPreset ?? undefined,
+    content: buildContentForType(type, ideas, baseText, preset),
   }));
 };
 
@@ -539,6 +624,32 @@ const fetchPreset = async (db: D1Database, id: string) => {
     .bind(id)
     .first<PresetRow>();
   return row ? mapPreset(row) : null;
+};
+
+const resolvePresetContext = async (
+  db: D1Database,
+  request: GenerateFromMaterialRequest,
+): Promise<PresetContext | undefined> => {
+  if (request.presetId) {
+    const preset = await fetchPreset(db, request.presetId);
+    if (preset) {
+      return {
+        title: preset.title,
+        systemPrompt: preset.systemPrompt,
+        userTemplate: preset.userInstructionTemplate,
+      };
+    }
+  }
+
+  if (request.presetTitle || request.presetSystemPrompt || request.presetUserTemplate) {
+    return {
+      title: request.presetTitle,
+      systemPrompt: request.presetSystemPrompt,
+      userTemplate: request.presetUserTemplate,
+    };
+  }
+
+  return undefined;
 };
 
 const buildLearningListQuery = (
@@ -693,7 +804,10 @@ app.post("/api/materials/ingest", async (c) => {
   const learning = await fetchLearning(c.env.DB, request.learningId);
   if (!learning) return c.json({ error: "learning_not_found" }, 404);
 
-  const { rawContent, extracted } = extractMaterialFromSource(request.source);
+  const { rawContent, extracted, metadata } = await extractMaterialFromSource(
+    request.source,
+    request.preferOffline ?? false,
+  );
   const id = crypto.randomUUID();
   const createdAt = nowIso();
   const updatedAt = createdAt;
@@ -718,6 +832,8 @@ app.post("/api/materials/ingest", async (c) => {
       toJson({
         ingestSource: request.source,
         preferOffline: request.preferOffline ?? false,
+        extracted,
+        origin: metadata?.sourceLabel,
       }),
       createdAt,
       updatedAt,
@@ -737,7 +853,7 @@ app.post("/api/materials/ingest", async (c) => {
       updatedAt,
     } as Material);
 
-  const job = buildIngestJob(request, "completed");
+  const job = buildIngestJob(request, "completed", material.id);
   return c.json(materialIngestResultSchema.parse({ material, job, extracted }), 201);
 });
 
@@ -855,13 +971,14 @@ app.post("/api/generate/from-material", async (c) => {
     return c.json({ error: "material_not_found" }, 404);
   }
 
-  const drafts = craftGeneratedContents(request, material);
+  const preset = await resolvePresetContext(c.env.DB, request);
+  const drafts = craftGeneratedContents(request, material, preset);
   const items: GeneratedContent[] = [];
   for (const draft of drafts) {
     items.push(await saveGeneratedContent(c.env.DB, draft));
   }
 
-  const job = buildGenerationJob(request.types, request.presetTitle);
+  const job = buildGenerationJob(request.types, preset);
   return c.json({ material, job, items });
 });
 
@@ -1022,6 +1139,14 @@ type SemanticMatch = SemanticNodeWithMeta & {
   embedding: number[];
 };
 
+const generatedLabelMap: Record<GeneratedContent["type"], string> = {
+  qa: "一問一答",
+  practice: "練習問題",
+  summary: "要約",
+  podcast_script: "ポッドキャスト",
+  other: "その他",
+};
+
 const EMBEDDING_DIMENSION = 12;
 
 const toEmbedding = (text: string): number[] => {
@@ -1033,61 +1158,6 @@ const toEmbedding = (text: string): number[] => {
   const norm = Math.sqrt(vec.reduce((sum, value) => sum + value ** 2, 0)) || 1;
   return vec.map((value) => Number((value / norm).toFixed(4)));
 };
-
-const semanticIndex: Array<SemanticNodeWithMeta & { embedding: number[] }> = [
-  {
-    id: "9c7c99b2-afe1-469e-8c22-1b8d566c6a30",
-    refType: "learning",
-    refId: "8e3dfdc0-5510-4c12-9f60-7cba439b1dea",
-    embedding: toEmbedding("二次関数 頂点 平方完成 例題3"),
-    metadata: { tags: ["二次関数", "基礎"], level: "highschool" },
-    label: "高校数学I: 二次関数",
-    excerpt:
-      "二次関数の平方完成、軸・頂点の求め方、判別式の確認をまとめた教材",
-    subject: "math",
-  },
-  {
-    id: "532bcb3a-1fde-4cf7-8f9a-98e36f257a61",
-    refType: "generated_content",
-    refId: "18b33a10-8528-4e53-8b1b-717f27a5a2c3",
-    embedding: toEmbedding("QA 頂点 最小値 チェック問題 集合"),
-    metadata: { tags: ["qa", "practice"] },
-    label: "平方完成チェック (Q&A)",
-    excerpt:
-      "f(x)=x^2+4x+5 の頂点と最小値を確認する短答式の問題セット。復習用。",
-    subject: "math",
-  },
-  {
-    id: "012f84a1-4f46-4aa1-8c56-288c8f146abe",
-    refType: "learning",
-    refId: "63a8e91f-1c40-4d73-8d8e-3a690c1da0e7",
-    embedding: toEmbedding("英語 長文 時制の一致 演習"),
-    metadata: { tags: ["english", "grammar"] },
-    label: "英語長文: 時制の一致",
-    excerpt: "時制の一致を題材にした英語長文読解。演習問題と要約付き。",
-    subject: "english",
-  },
-  {
-    id: "21b4f5fa-5f8b-44c7-ae34-61e07cf1b8e4",
-    refType: "generated_content",
-    refId: "86a9ffd4-5b10-4f17-9f6d-017fbd7edc5c",
-    embedding: toEmbedding("計算セット 軸 頂点 判別式 練習問題"),
-    metadata: { tags: ["practice", "math"] },
-    label: "基本計算セット (練習問題)",
-    excerpt: "軸と頂点、判別式の扱いを含む3問セット。復習モードに最適。",
-    subject: "math",
-  },
-  {
-    id: "e2a6e9e8-37c1-4f84-813e-207e6aa7e5a4",
-    refType: "generated_content",
-    refId: "b7e3a736-6e0f-4dfd-9fb0-1b5e26563185",
-    embedding: toEmbedding("時制の一致 Q&A 短答セット"),
-    metadata: { tags: ["qa", "english"] },
-    label: "時制の一致Q&A",
-    excerpt: "時制の一致を判断する短答式セット。用法の例文と解説付き。",
-    subject: "english",
-  },
-];
 
 const cosineSimilarity = (a: number[], b: number[]): number => {
   const dim = Math.min(a.length, b.length);
@@ -1104,13 +1174,118 @@ const cosineSimilarity = (a: number[], b: number[]): number => {
   return Number((dot / denom).toFixed(4));
 };
 
-const searchSemantic = (
+const flattenContent = (content: unknown): string => {
+  if (!content) return "";
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) return content.map(flattenContent).join(" ");
+  if (typeof content === "object") {
+    return Object.values(content as Record<string, unknown>)
+      .map((value) => flattenContent(value))
+      .filter(Boolean)
+      .join(" ");
+  }
+  return String(content);
+};
+
+const buildSemanticIndex = async (
+  db: D1Database,
+): Promise<Array<SemanticNodeWithMeta & { embedding: number[] }>> => {
+  const learningRows = await db
+    .prepare("SELECT * FROM Learning ORDER BY updatedAt DESC LIMIT 200")
+    .all<LearningRow>();
+  const learnings =
+    learningRows.results?.map((row) => ({
+      id: row.id,
+      title: row.title,
+      subject: row.subject ?? undefined,
+      tags: parseJson<string[]>(row.tags) ?? [],
+    })) ?? [];
+
+  const learningSubjectMap = new Map(learnings.map((item) => [item.id, item.subject]));
+
+  const materialRows = await db
+    .prepare("SELECT * FROM Material ORDER BY updatedAt DESC LIMIT 200")
+    .all<MaterialRow>();
+
+  const contentRows = await db
+    .prepare("SELECT * FROM GeneratedContent ORDER BY createdAt DESC LIMIT 200")
+    .all<GeneratedContentRow>();
+
+  const nodes: Array<SemanticNodeWithMeta & { embedding: number[] }> = [];
+
+  for (const learning of learnings) {
+    const basis = `${learning.title} ${learning.subject ?? ""} ${(learning.tags ?? []).join(" ")}`;
+    nodes.push({
+      id: learning.id,
+      refType: "learning",
+      refId: learning.id,
+      embedding: toEmbedding(basis),
+      metadata: { tags: learning.tags },
+      label: learning.title,
+      excerpt: summarizeText(basis, 120),
+      subject: learning.subject,
+    });
+  }
+
+  for (const row of materialRows.results ?? []) {
+    const mapped = mapMaterial(row);
+    const learningSubject = learningSubjectMap.get(mapped.learningId);
+    const body = mapped.rawContent ?? mapped.sourcePath ?? mapped.type;
+    nodes.push({
+      id: mapped.id,
+      refType: "material",
+      refId: mapped.id,
+      embedding: toEmbedding(`${mapped.type} ${body}`),
+      metadata: mapped.metadata,
+      label: `${mapped.type.toUpperCase()}: ${summarizeText(mapped.sourcePath ?? mapped.rawContent ?? "material", 48)}`,
+      excerpt: summarizeText(body ?? mapped.type, 160),
+      subject: learningSubject,
+    });
+  }
+
+  for (const row of contentRows.results ?? []) {
+    const mapped = mapGeneratedContent(row);
+    const body = flattenContent(mapped.content);
+    const learningSubject = learningSubjectMap.get(mapped.learningId);
+    nodes.push({
+      id: mapped.id,
+      refType: "generated_content",
+      refId: mapped.id,
+      embedding: toEmbedding(`${mapped.type} ${body}`),
+      metadata: { promptPreset: mapped.promptPreset },
+      label: `${generatedLabelMap[mapped.type] ?? mapped.type}: ${summarizeText(body, 48)}`,
+      excerpt: summarizeText(body, 160),
+      subject: learningSubject,
+    });
+  }
+
+  if (nodes.length > 0) return nodes;
+
+  // Fallback samples when DB is empty
+  return [
+    {
+      id: "fallback-learning",
+      refType: "learning",
+      refId: "fallback-learning",
+      embedding: toEmbedding("数学 二次関数 例題"),
+      metadata: { tags: ["math"] },
+      label: "高校数学I: 二次関数",
+      excerpt: "二次関数の平方完成や軸・頂点を扱う練習セット",
+      subject: "math",
+    },
+  ].map((node) => ({ ...node, embedding: node.embedding.slice() }));
+};
+
+const searchSemantic = async (
+  db: D1Database,
   query: string,
   topK: number,
   filters?: Partial<Pick<SemanticNodeWithMeta, "refType" | "subject">>,
-): SemanticMatch[] => {
+): Promise<SemanticMatch[]> => {
+  const index = await buildSemanticIndex(db);
   const queryVector = toEmbedding(query);
-  const matches = semanticIndex
+
+  const matches = index
     .filter((node) => {
       if (filters?.refType && node.refType !== filters.refType) return false;
       if (filters?.subject && node.subject !== filters.subject) return false;
@@ -1153,7 +1328,7 @@ app.post("/search/semantic", async (c) => {
   }
 
   const { query, topK, refType, subject } = parsed.data;
-  const results = searchSemantic(query, topK, { refType, subject });
+  const results = await searchSemantic(c.env.DB, query, topK, { refType, subject });
 
   return c.json({ query, topK, results });
 });
@@ -1173,7 +1348,7 @@ app.post("/ai/proxy", async (c) => {
   }
 
   const topK = parsed.data.topK ?? 3;
-  const related = searchSemantic(parsed.data.prompt, topK);
+  const related = await searchSemantic(c.env.DB, parsed.data.prompt, topK);
   const toolCalls = [
     {
       tool: "embed",
@@ -1188,10 +1363,11 @@ app.post("/ai/proxy", async (c) => {
     },
   ];
 
+  const topHit = related[0];
   const summary =
     related.length === 0
-      ? "近い教材が見つかりませんでしたが、新しいコンテンツを提案できます。"
-      : `関連の候補として「${related[0].label}」などが見つかりました。続けますか？`;
+      ? "関連する教材が見つからなかったので、新しい学習や問題セットを生成できます。テーマをもう少し具体的に教えてください。"
+      : `関連候補: 「${topHit.label}」(score ${topHit.score}). 同じテーマで続けますか？`;
 
   return c.json({
     message: summary,

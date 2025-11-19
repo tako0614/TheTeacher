@@ -181,10 +181,7 @@ export const bootstrapJobFromRequest = (
     preferredTranscriptionEngine: request.transcriptionEngine,
     steps,
     libraryPath: library.rootDir,
-    notes:
-      status === "queued"
-        ? "Tauriコマンド未接続: enqueueだけスタブ"
-        : undefined,
+    notes: status === "queued" ? "ingest_queue" : undefined,
   };
 };
 

@@ -4,6 +4,10 @@ import type {
   Material,
   PracticeSession,
   Preset,
+  type GenerateFromMaterialRequest,
+  type GenerationResult,
+  type MaterialIngestRequest,
+  type MaterialIngestResult,
 } from "@theteacher/shared";
 
 import { requestJson } from "./http";
@@ -61,14 +65,40 @@ export const deleteLearning = async (id: string) =>
 export const fetchMaterials = async (learningId: string) =>
   requestJson<{ items: Material[] }>({ path: `/api/learnings/${learningId}/materials` });
 
+export const ingestMaterial = async (
+  input: MaterialIngestRequest & { learningId: string },
+) =>
+  requestJson<MaterialIngestResult>({
+    path: "/api/materials/ingest",
+    method: "POST",
+    body: input,
+  });
+
 export const createMaterial = async (
   input: Omit<Material, "id" | "createdAt" | "updatedAt"> &
     Partial<Pick<Material, "id" | "createdAt" | "updatedAt">>,
 ) => requestJson<Material>({ path: "/api/materials", method: "POST", body: input });
 
+export const updateMaterial = async (
+  id: string,
+  input: Partial<Omit<Material, "id" | "learningId">>,
+) =>
+  requestJson<Material>({
+    path: `/api/materials/${id}`,
+    method: "PUT",
+    body: input,
+  });
+
 export const fetchContents = async (learningId: string) =>
   requestJson<{ items: GeneratedContent[] }>({
     path: `/api/learnings/${learningId}/contents`,
+  });
+
+export const generateFromMaterial = async (input: GenerateFromMaterialRequest) =>
+  requestJson<GenerationResult>({
+    path: "/api/generate/from-material",
+    method: "POST",
+    body: input,
   });
 
 export const createContent = async (
