@@ -20,6 +20,9 @@ import {
   type MaterialLibraryConfig,
   type MaterialLibraryEntry,
   type MaterialType,
+  type PracticeFeedback,
+  type PracticeMode,
+  type SimilarQuestion,
   type Preset,
 } from "@theteacher/shared";
 
@@ -31,6 +34,8 @@ import RichContentRenderer from "../components/rich-content/RichContentRenderer"
 import { getRichContentPreview } from "../lib/rich-content";
 
 import {
+  type GeneratedSummary,
+  type ProxyActions,
   type SemanticMatch,
   type ToolCallLog,
   type ToolName,
@@ -64,6 +69,7 @@ import { buildBackupSnapshot, downloadSnapshot, parseSnapshotFile } from "../lib
 import { selectPresetOptions, useSettings } from "../lib/settings-store";
 import { useNewLearningDraft } from "../lib/new-learning-draft-store";
 import { processMaterialFile } from "../lib/file-processing";
+import { gradePracticeAnswer } from "../lib/practice";
 
 const subjects = [
   { id: "all", label: "すべて" },
@@ -75,6 +81,12 @@ const subjects = [
 
 const subjectLabel = (value?: string | null) =>
   subjects.find((item) => item.id === value)?.label ?? value ?? "未設定";
+
+const extractRefId = (match: { id: string; refId?: string }) => {
+  if (match.refId && typeof match.refId === "string") return match.refId;
+  const parts = match.id.split(":");
+  return parts.length > 1 ? parts.slice(1).join(":") : match.id;
+};
 
 const formatDateTime = (value?: string | null) => {
   if (!value) return "記録なし";
@@ -95,7 +107,7 @@ const generatedTypeLabels: Record<GeneratedContentType, string> = {
   practice: "練習問題",
   summary: "要約",
   podcast_script: "ポッドキャスト",
-  other: "その他",
+  other: "リッチノート",
 };
 
 const detailTabs = [
@@ -103,6 +115,7 @@ const detailTabs = [
   { id: "practice", label: generatedTypeLabels.practice },
   { id: "summary", label: generatedTypeLabels.summary },
   { id: "podcast_script", label: generatedTypeLabels.podcast_script },
+  { id: "other", label: generatedTypeLabels.other },
 ];
 
 const LearningListSurface: Component = () => {
@@ -378,7 +391,6 @@ const LearningDetailSurface: Component = () => {
     () => learning()?.id,
     (id) => (id ? fetchSessions(id).then((res) => res.items) : []),
   );
-
   const formatBytes = (value?: number) =>
     value ? `${Math.round(value / 1024)} KB` : "サイズ不明";
 
@@ -642,6 +654,47 @@ const LearningDetailSurface: Component = () => {
     };
   });
   const selectedTabContents = createMemo(() => generatedByType()[tab()] ?? []);
+  const generatedContentMap = createMemo(() => {
+    const map = new Map<string, GeneratedContent>();
+    (generatedContents() ?? []).forEach((item) => map.set(item.id, item));
+    return map;
+  });
+  const learningSemanticSeed = createMemo(() => {
+    const current = learning();
+    if (!current) return "";
+    const tagsText = (current.tags ?? []).join(" ");
+    const lead = selectedTabContents()[0];
+    const preview =
+      lead?.content && typeof lead.content === "object"
+        ? previewContent(lead.content as Record<string, unknown>)
+        : undefined;
+    return [current.title, current.subject, tagsText, preview].filter(Boolean).join(" ");
+  });
+  const [semanticRelated, { refetch: refetchSemanticRelated }] = createResource(
+    () => {
+      const query = learningSemanticSeed().trim();
+      const current = learning();
+      if (!current || !query) return undefined;
+      return { query, subject: current.subject, learningId: current.id };
+    },
+    async (params) => {
+      if (!params) return { learningHits: [], contentHits: [] };
+      const [learningHits, contentHits] = await Promise.all([
+        semanticSearch(params.query, 4, {
+          refType: "learning",
+          subject: params.subject,
+        }),
+        semanticSearch(params.query, 6, {
+          refType: "generated_content",
+          subject: params.subject,
+        }),
+      ]);
+      return {
+        learningHits: learningHits.filter((hit) => extractRefId(hit) !== params.learningId),
+        contentHits,
+      };
+    },
+  );
 
   return (
     <Show
@@ -871,6 +924,137 @@ const LearningDetailSurface: Component = () => {
             </ul>
           </div>
 
+          <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <div class="flex items-center justify-between">
+              <p class="text-xs font-semibold uppercase text-slate-500">
+                関連候補 (意味検索)
+              </p>
+              <button
+                class="rounded-md border border-slate-200 px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                onClick={() => refetchSemanticRelated()}
+                disabled={semanticRelated.loading}
+              >
+                再検索
+              </button>
+            </div>
+            <div class="mt-2 space-y-3 text-sm text-slate-800">
+              <div class="space-y-2">
+                <p class="text-[11px] font-semibold uppercase text-slate-600">
+                  関連学習
+                </p>
+                <Show
+                  when={(semanticRelated()?.learningHits?.length ?? 0) > 0}
+                  fallback={
+                    <p class="text-xs text-slate-600">
+                      学習タイトル・タグをもとに近いカードを提示します。
+                    </p>
+                  }
+                >
+                  <div class="space-y-2">
+                    <For each={semanticRelated()?.learningHits ?? []}>
+                      {(hit) => {
+                        const refId = extractRefId(hit);
+                        const subjectText = hit.subject ? subjectLabel(hit.subject) : null;
+                        return (
+                          <div class="rounded-md bg-slate-50 px-3 py-2">
+                            <div class="flex items-center justify-between gap-2">
+                              <span class="font-semibold text-slate-900">
+                                {hit.label}
+                              </span>
+                              <span class="text-[11px] text-indigo-700">
+                                score {hit.score.toFixed(2)}
+                              </span>
+                            </div>
+                            <p class="text-xs text-slate-600">{hit.excerpt}</p>
+                            <div class="mt-1 flex flex-wrap items-center gap-2">
+                              <Show when={subjectText}>
+                                {(text) => (
+                                  <span class="rounded-full bg-indigo-50 px-2 py-1 text-[11px] font-semibold text-indigo-700">
+                                    {text()}
+                                  </span>
+                                )}
+                              </Show>
+                              <Show when={hit.refType === "learning" && refId}>
+                                <button
+                                  class="rounded-md border border-slate-200 px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-white"
+                                  onClick={() => navigate(`/learning-detail?id=${refId}`)}
+                                >
+                                  詳細へ
+                                </button>
+                              </Show>
+                            </div>
+                          </div>
+                        );
+                      }}
+                    </For>
+                  </div>
+                </Show>
+              </div>
+
+              <div class="space-y-2">
+                <p class="text-[11px] font-semibold uppercase text-slate-600">
+                  関連生成物 / 問題
+                </p>
+                <Show
+                  when={(semanticRelated()?.contentHits?.length ?? 0) > 0}
+                  fallback={
+                    <p class="text-xs text-slate-600">
+                      生成コンテンツに近い要約・問題があればここに表示します。
+                    </p>
+                  }
+                >
+                  <div class="space-y-2">
+                    <For each={(semanticRelated()?.contentHits ?? []).slice(0, 5)}>
+                      {(hit) => {
+                        const refId = extractRefId(hit);
+                        const local = refId ? generatedContentMap().get(refId) : undefined;
+                        const subjectText = hit.subject ? subjectLabel(hit.subject) : null;
+                        return (
+                          <div class="rounded-md bg-slate-50 px-3 py-2">
+                            <div class="flex items-center justify-between gap-2">
+                              <span class="font-semibold text-slate-900">{hit.label}</span>
+                              <span class="text-[11px] text-indigo-700">
+                                score {hit.score.toFixed(2)}
+                              </span>
+                            </div>
+                            <p class="text-xs text-slate-600">{hit.excerpt}</p>
+                            <div class="mt-1 flex flex-wrap items-center gap-2">
+                              <Show when={local}>
+                                {(content) => (
+                                  <button
+                                    class="rounded-md border border-indigo-200 bg-indigo-50 px-2 py-1 text-[11px] font-semibold text-indigo-700 hover:bg-indigo-100"
+                                    onClick={() => {
+                                      setTab(content().type);
+                                      if (content().materialId) {
+                                        setSelectedMaterialId(content().materialId);
+                                      }
+                                    }}
+                                  >
+                                    この生成物を開く
+                                  </button>
+                                )}
+                              </Show>
+                              <Show when={subjectText}>
+                                {(text) => (
+                                  <span class="rounded-full bg-emerald-50 px-2 py-1 text-[11px] font-semibold text-emerald-700">
+                                    {text()}
+                                  </span>
+                                )}
+                              </Show>
+                            </div>
+                          </div>
+                        );
+                      }}
+                    </For>
+                  </div>
+                </Show>
+              </div>
+              <Show when={semanticRelated.loading}>
+                <p class="text-[11px] text-slate-500">検索中...</p>
+              </Show>
+            </div>
+          </div>
+
           <div class="rounded-xl border border-indigo-100 bg-indigo-50 p-4 shadow-sm text-sm text-indigo-900">
             タブ切り替え・教材・生成履歴を一箇所にまとめ、演習フローへ移りやすいMVP版の詳細画面です。
           </div>
@@ -1086,15 +1270,23 @@ const PracticeSurface: Component = () => {
     hint?: string;
   }
 
-  const [mode, setMode] = createSignal<"handwriting" | "text">("text");
+  const navigate = useNavigate();
+  const [mode, setMode] = createSignal<PracticeMode>("text");
   const [selectedLearningId, setSelectedLearningId] = createSignal<string>();
   const [questionIndex, setQuestionIndex] = createSignal(0);
   const [answer, setAnswer] = createSignal("");
-  const [grading, setGrading] = createSignal<{ score: number; isCorrect: boolean; comment: string } | null>(
-    null,
-  );
+  const [grading, setGrading] = createSignal<PracticeFeedback | null>(null);
+  const [handwritingCapture, setHandwritingCapture] = createSignal<{
+    dataUrl?: string;
+    fileName: string;
+    mimeType?: string;
+    extractedText?: string;
+  } | null>(null);
+  const [isOcring, setIsOcring] = createSignal(false);
   const [isSubmitting, setIsSubmitting] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+  const [conversation, setConversation] = createSignal<{ role: "user" | "assistant"; text: string }[]>([]);
+  const [suggestedSimilar, setSuggestedSimilar] = createSignal<SimilarQuestion[]>([]);
 
   const [learnings] = createResource(() => true, () => fetchLearnings({ limit: 50 }));
   createEffect(() => {
@@ -1112,32 +1304,67 @@ const PracticeSurface: Component = () => {
     () => selectedLearningId(),
     (id) => (id ? fetchSessions(id).then((res) => res.items) : []),
   );
+  const selectedPracticeLearning = createMemo(() =>
+    (learnings() ?? []).find((item) => item.id === selectedLearningId()),
+  );
+
+  const isPlainRecord = (value: unknown): value is Record<string, unknown> =>
+    typeof value === "object" && value !== null && !Array.isArray(value);
+
+  const readMetadataList = (
+    payload: Record<string, unknown>,
+    key: string,
+    legacyKeys: string[] = [],
+  ) => {
+    const metadata = payload["metadata"];
+    if (isPlainRecord(metadata)) {
+      const candidate = metadata[key];
+      if (Array.isArray(candidate)) {
+        return candidate.filter(isPlainRecord);
+      }
+    }
+    for (const fallbackKey of [key, ...legacyKeys]) {
+      const fallback = payload[fallbackKey];
+      if (Array.isArray(fallback)) {
+        return fallback.filter(isPlainRecord);
+      }
+    }
+    return [];
+  };
+
+  const asString = (value: unknown, fallback: string) =>
+    (typeof value === "string" && value.trim().length > 0 ? value : fallback);
 
   const questions = createMemo<Question[]>(() => {
     const contents = generatedContents() ?? [];
     const extracted: Question[] = [];
     for (const content of contents) {
       const payload = content.content as Record<string, unknown>;
-      if (content.type === "practice" && Array.isArray(payload.items)) {
-        for (const item of payload.items as Record<string, string>[]) {
+      if (content.type === "practice") {
+        const items = readMetadataList(payload, "practiceItems", ["items"]);
+        for (const item of items) {
           extracted.push({
             id: crypto.randomUUID(),
             generatedContentId: content.id,
-            title: payload.title ? String(payload.title) : "練習問題",
-            prompt: item.prompt ?? item.question ?? "問題文が取得できませんでした。",
-            expected: item.expectedAnswer ?? item.answer,
-            hint: item.hint,
+            title: asString(payload.title, "練習問題"),
+            prompt: asString(
+              item.prompt ?? item.question,
+              "問題文が取得できませんでした。",
+            ),
+            expected: typeof item.expectedAnswer === "string" ? item.expectedAnswer : (typeof item.answer === "string" ? item.answer : undefined),
+            hint: typeof item.hint === "string" ? item.hint : undefined,
           });
         }
-      } else if (content.type === "qa" && Array.isArray(payload.pairs)) {
-        for (const pair of payload.pairs as Record<string, string>[]) {
+      } else if (content.type === "qa") {
+        const pairs = readMetadataList(payload, "qaPairs", ["pairs"]);
+        for (const pair of pairs) {
           extracted.push({
             id: crypto.randomUUID(),
             generatedContentId: content.id,
-            title: payload.title ? String(payload.title) : "一問一答",
-            prompt: pair.question ?? "質問が取得できませんでした。",
-            expected: pair.answer,
-            hint: pair.rationale,
+            title: asString(payload.title, "一問一答"),
+            prompt: asString(pair.question, "質問が取得できませんでした。"),
+            expected: typeof pair.answer === "string" ? pair.answer : undefined,
+            hint: typeof pair.rationale === "string" ? pair.rationale : undefined,
           });
         }
       }
@@ -1146,6 +1373,35 @@ const PracticeSurface: Component = () => {
   });
 
   const currentQuestion = createMemo(() => questions()[questionIndex()] ?? null);
+  const practiceSemanticQuery = createMemo(() => {
+    const question = currentQuestion();
+    if (!question) return "";
+    const parts = [question.title, question.prompt, question.hint, question.expected]
+      .map((item) => (item ?? "").toString().trim())
+      .filter(Boolean);
+    return parts.join(" ");
+  });
+  const [practiceSemantic, { refetch: refetchPracticeSemantic }] = createResource(
+    () => {
+      const query = practiceSemanticQuery().trim();
+      if (!query) return undefined;
+      return { query, subject: selectedPracticeLearning()?.subject };
+    },
+    async (params) => {
+      if (!params) return { learningHits: [], contentHits: [] };
+      const [learningHits, contentHits] = await Promise.all([
+        semanticSearch(params.query, 3, {
+          refType: "learning",
+          subject: params.subject,
+        }),
+        semanticSearch(params.query, 6, {
+          refType: "generated_content",
+          subject: params.subject,
+        }),
+      ]);
+      return { learningHits, contentHits };
+    },
+  );
 
   const computeScore = (expected: string, input: string) => {
     if (!expected) return 0;
@@ -1162,6 +1418,68 @@ const PracticeSurface: Component = () => {
     return Math.min(1, overlap / expectedTokens.length);
   };
 
+  const verdictLabel = (verdict?: PracticeFeedback["verdict"]) => {
+    if (verdict === "correct") return "正解";
+    if (verdict === "partial") return "部分正解";
+    if (verdict === "incorrect") return "不正解";
+    return "未判定";
+  };
+
+  const buildLocalFeedback = (question: Question, input: string): PracticeFeedback => {
+    const score = computeScore(question.expected ?? "", input);
+    const verdict = score >= 0.75 ? "correct" : score >= 0.45 ? "partial" : "incorrect";
+    return {
+      score,
+      verdict,
+      comment:
+        verdict === "correct"
+          ? "主要なキーワードが揃っています。"
+          : verdict === "partial"
+            ? "一部不足があります。ヒントを補ってみてください。"
+            : "キーワードがほとんど一致していません。もう一度組み立てましょう。",
+      reasoning: question.expected ? `想定解: ${question.expected}` : undefined,
+      keyPoints: question.hint ? [question.hint] : undefined,
+      suggestedSimilar: [
+        { prompt: `${question.prompt} を別の例で説明する問題`, hint: question.hint },
+        { prompt: `${question.prompt} を一文で要約してください。` },
+      ],
+      nextAction:
+        verdict === "correct"
+          ? "類題に取り組んで定着度を確認しましょう。"
+          : "不足キーワードを足して再提出してください。",
+      usedAi: false,
+    };
+  };
+
+  const handleHandwritingFile = async (file: File | null) => {
+    if (!file) return;
+    setIsOcring(true);
+    setError(null);
+    try {
+      const processed = await processMaterialFile(file, "image");
+      const capture = processed.dataUrl
+        ? {
+            dataUrl: processed.dataUrl,
+            fileName: file.name,
+            mimeType: processed.mimeType,
+            extractedText: processed.text,
+          }
+        : {
+            fileName: file.name,
+            mimeType: processed.mimeType,
+            extractedText: processed.text,
+          };
+      setHandwritingCapture(capture);
+      if (processed.text?.trim()) {
+        setAnswer(processed.text.trim());
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "画像の取り込みに失敗しました。");
+    } finally {
+      setIsOcring(false);
+    }
+  };
+
   const moveQuestion = (delta: number) => {
     const total = questions().length;
     if (total === 0) return;
@@ -1173,6 +1491,9 @@ const PracticeSurface: Component = () => {
     });
     setAnswer("");
     setGrading(null);
+    setSuggestedSimilar([]);
+    setHandwritingCapture(null);
+    setConversation([]);
   };
 
   const handleSubmit = async () => {
@@ -1183,17 +1504,45 @@ const PracticeSurface: Component = () => {
     const trimmed = answer().trim();
     if (!trimmed) return;
 
-    const score = computeScore(question.expected ?? "", trimmed);
-    const isCorrect = score >= 0.6;
-    const comment =
-      question.expected && score < 0.3
-        ? "キーワードがほとんど一致していません。ヒントを参考に解き直してください。"
-        : score >= 0.6
-          ? "概ね正解です。"
-          : "一部不足があります。もう一度確認しましょう。";
-
     setIsSubmitting(true);
+    const artifacts =
+      mode() === "handwriting" && handwritingCapture()?.dataUrl
+        ? [
+            {
+              kind: "image" as const,
+              dataUrl: handwritingCapture()!.dataUrl!,
+              name: handwritingCapture()?.fileName,
+              mimeType: handwritingCapture()?.mimeType,
+            },
+          ]
+        : undefined;
+    const userTurn = { role: "user" as const, text: trimmed };
+
+    const appendAssistantTurn = (feedback: PracticeFeedback) => {
+      const parts = [feedback.comment, feedback.reasoning, feedback.nextAction].filter(Boolean);
+      setConversation((log) =>
+        [...log, userTurn, { role: "assistant", text: parts.join("\n") }].slice(-10),
+      );
+    };
+
     try {
+      const response = await gradePracticeAnswer({
+        question: {
+          prompt: question.prompt,
+          expected: question.expected,
+          hint: question.hint,
+          title: question.title,
+        },
+        answer: trimmed,
+        mode: mode(),
+        artifacts,
+      });
+
+      const feedback = response.feedback ?? buildLocalFeedback(question, trimmed);
+      setGrading(feedback);
+      setSuggestedSimilar(feedback.suggestedSimilar ?? []);
+      appendAssistantTurn(feedback);
+
       await createSession({
         learningId,
         generatedContentId: question.generatedContentId,
@@ -1203,14 +1552,22 @@ const PracticeSurface: Component = () => {
           expected: question.expected,
         },
         answerText: trimmed,
-        isCorrect,
-        feedback: { comment, hint: question.hint },
-        score,
+        isCorrect: feedback.verdict === "correct",
+        feedback: {
+          ...feedback,
+          mode: mode(),
+          artifactName: handwritingCapture()?.fileName,
+        },
+        score: feedback.score,
       });
-      setGrading({ score, isCorrect, comment });
+
       setAnswer("");
       await Promise.all([refetchSessions(), refetchContents()]);
     } catch (err) {
+      const fallback = buildLocalFeedback(question, trimmed);
+      setGrading(fallback);
+      setSuggestedSimilar(fallback.suggestedSimilar ?? []);
+      appendAssistantTurn(fallback);
       setError(err instanceof Error ? err.message : "採点に失敗しました。");
     } finally {
       setIsSubmitting(false);
@@ -1309,11 +1666,140 @@ const PracticeSurface: Component = () => {
             </div>
 
             <div class="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-sm text-slate-600">
-              <p class="font-semibold text-slate-800">関連情報</p>
+              <div class="flex items-center justify-between gap-2">
+                <p class="font-semibold text-slate-800">関連情報 / セマンティックリンク</p>
+                <button
+                  class="rounded-md border border-slate-300 px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-white disabled:cursor-not-allowed disabled:opacity-60"
+                  onClick={() => refetchPracticeSemantic()}
+                  disabled={practiceSemantic.loading || !practiceSemanticQuery().trim()}
+                >
+                  再検索
+                </button>
+              </div>
               <p class="mt-2">
-                練習問題の元になった生成コンテンツ ID: {currentQuestion()?.generatedContentId}
-                。解答のみ入力して送信してください。
+                選択中: {selectedPracticeLearning()?.title ?? "学習未選択"} / 生成コンテンツ{" "}
+                {currentQuestion()?.generatedContentId ?? "-"}
               </p>
+              <div class="mt-3 space-y-3">
+                <div class="space-y-1">
+                  <p class="text-[11px] font-semibold uppercase text-slate-600">
+                    関連学習
+                  </p>
+                  <Show
+                    when={(practiceSemantic()?.learningHits?.length ?? 0) > 0}
+                    fallback={<p class="text-xs text-slate-600">問題文をもとに関連学習カードを提示します。</p>}
+                  >
+                    <div class="space-y-2">
+                      <For each={practiceSemantic()?.learningHits ?? []}>
+                        {(hit) => {
+                          const refId = extractRefId(hit);
+                          const subjectText = hit.subject ? subjectLabel(hit.subject) : null;
+                          return (
+                            <div class="rounded-md bg-white px-3 py-2">
+                              <div class="flex items-center justify-between gap-2">
+                                <span class="font-semibold text-slate-900">{hit.label}</span>
+                                <span class="text-[11px] text-indigo-700">
+                                  score {hit.score.toFixed(2)}
+                                </span>
+                              </div>
+                              <p class="text-xs text-slate-600">{hit.excerpt}</p>
+                              <div class="mt-1 flex flex-wrap items-center gap-2">
+                                <Show when={subjectText}>
+                                  {(text) => (
+                                    <span class="rounded-full bg-indigo-50 px-2 py-1 text-[11px] font-semibold text-indigo-700">
+                                      {text()}
+                                    </span>
+                                  )}
+                                </Show>
+                                <Show when={hit.refType === "learning" && refId}>
+                                  <div class="flex flex-wrap gap-2">
+                                    <button
+                                      class="rounded-md border border-slate-200 px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-50"
+                                      onClick={() => {
+                                        setSelectedLearningId(refId!);
+                                        setQuestionIndex(0);
+                                        setGrading(null);
+                                        setSuggestedSimilar([]);
+                                        setAnswer("");
+                                      }}
+                                    >
+                                      この学習で演習
+                                    </button>
+                                    <button
+                                      class="rounded-md border border-slate-200 px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-50"
+                                      onClick={() => navigate(`/learning-detail?id=${refId}`)}
+                                    >
+                                      詳細を開く
+                                    </button>
+                                  </div>
+                                </Show>
+                              </div>
+                            </div>
+                          );
+                        }}
+                      </For>
+                    </div>
+                  </Show>
+                </div>
+
+                <div class="space-y-1">
+                  <p class="text-[11px] font-semibold uppercase text-slate-600">
+                    関連問題・生成物
+                  </p>
+                  <Show
+                    when={(practiceSemantic()?.contentHits?.length ?? 0) > 0}
+                    fallback={<p class="text-xs text-slate-600">この問題に近い生成物があればここに表示します。</p>}
+                  >
+                    <div class="space-y-2">
+                      <For each={(practiceSemantic()?.contentHits ?? []).slice(0, 5)}>
+                        {(hit) => {
+                          const refId = extractRefId(hit);
+                          const localQuestionIndex = refId
+                            ? questions().findIndex((item) => item.generatedContentId === refId)
+                            : -1;
+                          const subjectText = hit.subject ? subjectLabel(hit.subject) : null;
+                          return (
+                            <div class="rounded-md bg-white px-3 py-2">
+                              <div class="flex items-center justify-between gap-2">
+                                <span class="font-semibold text-slate-900">{hit.label}</span>
+                                <span class="text-[11px] text-indigo-700">
+                                  score {hit.score.toFixed(2)}
+                                </span>
+                              </div>
+                              <p class="text-xs text-slate-600">{hit.excerpt}</p>
+                              <div class="mt-1 flex flex-wrap items-center gap-2">
+                                <Show when={localQuestionIndex >= 0}>
+                                  <button
+                                    class="rounded-md border border-indigo-200 bg-indigo-50 px-2 py-1 text-[11px] font-semibold text-indigo-700 hover:bg-indigo-100"
+                                    onClick={() => {
+                                      setQuestionIndex(localQuestionIndex);
+                                      setAnswer("");
+                                      setGrading(null);
+                                      setSuggestedSimilar([]);
+                                    }}
+                                  >
+                                    この問題にジャンプ
+                                  </button>
+                                </Show>
+                                <Show when={subjectText}>
+                                  {(text) => (
+                                    <span class="rounded-full bg-emerald-50 px-2 py-1 text-[11px] font-semibold text-emerald-700">
+                                      {text()}
+                                    </span>
+                                  )}
+                                </Show>
+                              </div>
+                            </div>
+                          );
+                        }}
+                      </For>
+                    </div>
+                  </Show>
+                </div>
+                <Show when={practiceSemantic.loading}>
+                  <p class="text-[11px] text-slate-500">検索中...</p>
+                </Show>
+              </div>
             </div>
           </div>
 
@@ -1322,23 +1808,66 @@ const PracticeSurface: Component = () => {
               <p class="text-xs font-semibold uppercase text-slate-500">
                 回答
               </p>
+              <Show when={mode() === "handwriting"}>
+                <div class="space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-3">
+                  <div class="flex items-center justify-between gap-2">
+                    <p class="text-xs font-semibold text-slate-700">手書き画像を取り込む (OCR)</p>
+                    <Show when={isOcring()}>
+                      <span class="text-[11px] text-slate-500">OCR処理中...</span>
+                    </Show>
+                  </div>
+                  <label class="flex cursor-pointer items-center justify-center rounded-md border border-dashed border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:border-indigo-200 hover:text-indigo-700">
+                    <input
+                      type="file"
+                      accept="image/*"
+                      class="sr-only"
+                      onChange={(e) => handleHandwritingFile(e.currentTarget.files?.[0] ?? null)}
+                    />
+                    画像をアップロードしてOCRする
+                  </label>
+                  <Show when={handwritingCapture()}>
+                    {(capture) => (
+                      <div class="space-y-1 text-xs text-slate-600">
+                        <p class="font-semibold text-slate-800">添付: {capture().fileName}</p>
+                        <Show when={capture().dataUrl}>
+                          {(img) => (
+                            <img
+                              src={img()}
+                              alt="手書き回答プレビュー"
+                              class="h-28 w-full rounded-md object-contain"
+                            />
+                          )}
+                        </Show>
+                        <Show when={capture().extractedText}>
+                          {(text) => (
+                            <p class="text-slate-500">
+                              OCR抽出: {text().slice(0, 140)}
+                              {text().length > 140 ? "..." : ""}
+                            </p>
+                          )}
+                        </Show>
+                      </div>
+                    )}
+                  </Show>
+                </div>
+              </Show>
               <textarea
                 class="h-28 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-indigo-300 focus:outline-none focus:ring-2 focus:ring-indigo-100"
                 placeholder={
                   mode() === "handwriting"
-                    ? "紙に解いた結果を入力してください。"
+                    ? "紙に解いた内容を貼り付けるか、OCR結果を確認して編集してください。"
                     : "回答を直接入力してください。キーワードを簡潔に含めてください。"
                 }
                 value={answer()}
                 onInput={(e) => setAnswer(e.currentTarget.value)}
               />
-              <div class="flex gap-2 text-xs text-slate-600">
+              <div class="flex flex-wrap gap-2 text-xs text-slate-600">
                 <button
                   class="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-70"
                   onClick={handleSubmit}
                   disabled={isSubmitting() || !answer().trim()}
                 >
-                  {isSubmitting() ? "採点中..." : "採点して送信"}
+                  {isSubmitting() ? "採点中..." : "AI採点して送信"}
                 </button>
                 <button
                   class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
@@ -1362,14 +1891,89 @@ const PracticeSurface: Component = () => {
                   fallback={<p>採点するとここにスコアとコメントが表示されます。</p>}
                 >
                   {(result) => (
-                    <>
-                      <p>
-                        正答判定: {result().isCorrect ? "正解" : "部分正解"} / score{" "}
-                        {(result().score * 100).toFixed(0)}%
-                      </p>
-                      <p class="text-xs text-slate-600">{result().comment}</p>
-                    </>
+                    <div class="space-y-2">
+                      <div class="flex items-center gap-2 text-sm font-semibold text-slate-900">
+                        <span>
+                          {verdictLabel(result().verdict)} / score {(result().score * 100).toFixed(0)}%
+                        </span>
+                        <Show when={result().usedAi}>
+                          <span class="rounded bg-indigo-50 px-2 py-1 text-[11px] font-semibold text-indigo-600">
+                            AI採点
+                          </span>
+                        </Show>
+                      </div>
+                      <p class="text-sm text-slate-800 whitespace-pre-wrap">{result().comment}</p>
+                      <Show when={result().reasoning}>
+                        {(reason) => <p class="text-xs text-slate-600">理由: {reason()}</p>}
+                      </Show>
+                      <Show when={(result().keyPoints ?? []).length > 0}>
+                        <div class="flex flex-wrap gap-1 text-[11px] text-slate-700">
+                          <For each={result().keyPoints ?? []}>
+                            {(point) => <span class="rounded-md bg-white px-2 py-1">{point}</span>}
+                          </For>
+                        </div>
+                      </Show>
+                      <Show when={result().nextAction}>
+                        {(next) => (
+                          <p class="text-xs font-semibold text-slate-700">
+                            次のステップ: {next()}
+                          </p>
+                        )}
+                      </Show>
+                    </div>
                   )}
+                </Show>
+              </div>
+            </div>
+
+            <div class="space-y-2">
+              <p class="text-xs font-semibold uppercase text-slate-500">
+                AIとの対話ログ
+              </p>
+              <div class="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-800">
+                <Show
+                  when={conversation().length > 0}
+                  fallback={<p class="text-xs text-slate-600">採点するとAIからのコメントが表示されます。</p>}
+                >
+                  <div class="space-y-2">
+                    <For each={conversation()}>
+                      {(entry) => (
+                        <div
+                          class={`rounded-md p-2 ${
+                            entry.role === "assistant" ? "bg-indigo-50 text-slate-900" : "bg-white"
+                          }`}
+                        >
+                          <p class="text-[11px] font-semibold uppercase text-slate-500">
+                            {entry.role === "assistant" ? "AI" : "あなた"}
+                          </p>
+                          <p class="whitespace-pre-wrap text-sm text-slate-800">{entry.text}</p>
+                        </div>
+                      )}
+                    </For>
+                  </div>
+                </Show>
+              </div>
+            </div>
+
+            <div class="space-y-2">
+              <p class="text-xs font-semibold uppercase text-slate-500">
+                類題 / 次の練習
+              </p>
+              <div class="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-800">
+                <Show
+                  when={suggestedSimilar().length > 0}
+                  fallback={<p class="text-xs text-slate-600">AIが提案した類題がここに表示されます。</p>}
+                >
+                  <div class="space-y-2">
+                    <For each={suggestedSimilar()}>
+                      {(item) => (
+                        <div class="rounded-md bg-white p-2">
+                          <p class="text-sm font-semibold text-slate-900">{item.prompt}</p>
+                          <p class="text-xs text-slate-600">{item.hint ?? ""}</p>
+                        </div>
+                      )}
+                    </For>
+                  </div>
                 </Show>
               </div>
             </div>
@@ -1380,17 +1984,24 @@ const PracticeSurface: Component = () => {
               </p>
               <div class="space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm">
                 <For each={sessions() ?? []}>
-                  {(session) => (
-                    <div class="rounded-md bg-white p-2 text-slate-800">
-                      <p class="text-xs font-semibold uppercase text-slate-500">
-                        {(session.questionRef?.title as string) ?? "演習"}
-                      </p>
-                      <p class="mt-1 text-sm">{(session.questionRef?.prompt as string)}</p>
-                      <p class="text-xs text-slate-500">
-                        あなた: {session.answerText} / score {session.score ? (session.score * 100).toFixed(0) : "-"}%
-                      </p>
-                    </div>
-                  )}
+                  {(session) => {
+                    const feedback = session.feedback as PracticeFeedback | undefined;
+                    return (
+                      <div class="rounded-md bg-white p-2 text-slate-800">
+                        <p class="text-xs font-semibold uppercase text-slate-500">
+                          {(session.questionRef?.title as string) ?? "演習"}
+                        </p>
+                        <p class="mt-1 text-sm">{(session.questionRef?.prompt as string)}</p>
+                        <p class="text-xs text-slate-500">
+                          {verdictLabel(feedback?.verdict)} ・ score{" "}
+                          {session.score ? (session.score * 100).toFixed(0) : "-"}%
+                        </p>
+                        <Show when={feedback?.comment}>
+                          {(comment) => <p class="text-xs text-slate-600">{comment()}</p>}
+                        </Show>
+                      </div>
+                    );
+                  }}
                 </For>
                 <Show when={(sessions() ?? []).length === 0}>
                   <p class="text-xs text-slate-500">まだ演習ログがありません。</p>
@@ -1424,6 +2035,8 @@ const ChatSurface: Component = () => {
   const [draft, setDraft] = createSignal("");
   const [isSending, setIsSending] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+  const [lastProxyActions, setLastProxyActions] = createSignal<ProxyActions | null>(null);
+  const [generatedSummaries, setGeneratedSummaries] = createSignal<GeneratedSummary[]>([]);
 
   const [toolSearchQuery, setToolSearchQuery] = createSignal("");
   const [toolNewLearningTitle, setToolNewLearningTitle] = createSignal("");
@@ -1439,6 +2052,20 @@ const ChatSurface: Component = () => {
     semanticHits().filter((hit) => hit.refType === "material").length;
   const contentCandidateCount = () =>
     semanticHits().filter((hit) => hit.refType === "generated_content").length;
+
+  const syntheticLearningFromActions = (actions: ProxyActions | null): SemanticMatch | null => {
+    if (!actions?.createdLearningId) return null;
+    return {
+      id: actions.createdLearningId,
+      label: actions.createdLearningTitle ?? "AI提案の新規Learning",
+      excerpt:
+        actions.createdLearningReason ??
+        "AIチャットのリクエストから生成した学習カードです。",
+      score: 1,
+      refType: "learning",
+      subject: actions.createdLearningSubject,
+    };
+  };
 
   const appendMessage = (role: ChatMessage["role"], content: string) =>
     setMessages((prev) => [...prev, { role, content }]);
@@ -1486,8 +2113,15 @@ const ChatSurface: Component = () => {
       }
       if (payload.tool === "create_learning_from_chat") {
         const learning = (payload.result as { learning?: { title: string } }).learning;
+        const material = (payload.result as { material?: { sourcePath?: string } }).material;
         if (learning) {
           appendMessage("assistant", `学習カードを作成しました: ${learning.title}`);
+          if (material) {
+            appendMessage(
+              "assistant",
+              `チャット本文を教材として保存しました (${material.sourcePath ?? "text"})`,
+            );
+          }
         }
       }
     } catch (err) {
@@ -1499,7 +2133,14 @@ const ChatSurface: Component = () => {
   };
 
   const handleSendToNewLearning = () => {
-    const hits = semanticHits();
+    let hits = semanticHits();
+    if (hits.length === 0) {
+      const synthetic = syntheticLearningFromActions(lastProxyActions());
+      if (synthetic) {
+        hits = [synthetic];
+        setSemanticHits(hits);
+      }
+    }
     if (hits.length === 0) {
       setError("意味検索結果がないため学習候補を作成できません。");
       return;
@@ -1532,16 +2173,22 @@ const ChatSurface: Component = () => {
         topK: 4,
         tone: tone(),
       });
+      const actions = reply.actions ?? null;
+      setLastProxyActions(actions);
+      setGeneratedSummaries(actions?.generatedContentSummaries ?? []);
       if (reply.toolCalls.length > 0) {
         setToolCalls((prev) => [...prev, ...reply.toolCalls]);
       }
-      if (reply.related.length > 0) {
-        setSemanticHits(reply.related);
-      }
+      const synthetic = syntheticLearningFromActions(actions);
+      const nextHits =
+        reply.related.length > 0 ? reply.related : synthetic ? [synthetic] : [];
+      setSemanticHits(nextHits);
       appendMessage("assistant", reply.reply);
     } catch (err) {
       console.error(err);
       setError("Tool Call連携に失敗しました。もう一度お試しください。");
+      setLastProxyActions(null);
+      setGeneratedSummaries([]);
     } finally {
       setDraft("");
       setIsSending(false);
@@ -1712,9 +2359,16 @@ const ChatSurface: Component = () => {
               <Show
                 when={learningCandidate()}
                 fallback={
-                  <p class="text-xs text-indigo-700">
-                    意味検索が完了すると、ここから抽出候補を新しい学習作成フローに送れます。
-                  </p>
+                  <div class="space-y-1 text-xs text-indigo-700">
+                    <p>意味検索が完了すると、ここから抽出候補を新しい学習作成フローに送れます。</p>
+                    <Show when={lastProxyActions()?.createdLearningId}>
+                      <p>
+                        AIが「
+                        {lastProxyActions()?.createdLearningTitle ?? "新規Learning"}
+                        」を作成済みです。下のボタンで /new-learning に引き継げます。
+                      </p>
+                    </Show>
+                  </div>
                 }
               >
                 {(candidate) => (
@@ -1737,6 +2391,35 @@ const ChatSurface: Component = () => {
                 )}
               </Show>
             </div>
+          </div>
+          <div class="space-y-2 rounded-lg border border-violet-200 bg-violet-50 p-3">
+            <p class="text-xs font-semibold uppercase text-violet-700">
+              最新の生成結果
+            </p>
+            <Show
+              when={generatedSummaries().length > 0}
+              fallback={<p class="text-sm text-violet-900">AIが生成した問題や要約のサマリがここに表示されます。</p>}
+            >
+              <ul class="space-y-2 text-sm text-violet-900">
+                <For each={generatedSummaries()}>
+                  {(item) => (
+                    <li class="rounded-md border border-violet-200 bg-white/70 px-3 py-2">
+                      <p class="font-semibold">
+                        {generatedTypeLabels[item.type] ?? item.type}
+                      </p>
+                      <p class="text-xs text-violet-700">{item.title}</p>
+                      <Show when={item.learningTitle}>
+                        {(title) => (
+                          <p class="text-[11px] text-violet-600">
+                            ベース: {title()}
+                          </p>
+                        )}
+                      </Show>
+                    </li>
+                  )}
+                </For>
+              </ul>
+            </Show>
           </div>
         </aside>
 
@@ -1813,7 +2496,11 @@ const ChatSurface: Component = () => {
               </button>
               <button
                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-70"
-                onClick={() => void runSemanticSearch(draft())}
+                onClick={() => {
+                  setLastProxyActions(null);
+                  setGeneratedSummaries([]);
+                  void runSemanticSearch(draft());
+                }}
                 disabled={isSending() || !draft().trim()}
               >
                 意味検索のみ
@@ -1843,7 +2530,7 @@ const materialTypeLabels: Record<MaterialType, string> = {
   url: "URL",
 };
 
-const materialFilterOptions: Array<{ id: "all" | MaterialType; label: string }> = [
+const materialFilterOptions: { id: "all" | MaterialType; label: string }[] = [
   { id: "all", label: "すべて" },
   { id: "pdf", label: materialTypeLabels.pdf },
   { id: "image", label: materialTypeLabels.image },
@@ -1858,6 +2545,7 @@ const generationTargetOrder: GeneratedContentType[] = [
   "practice",
   "summary",
   "podcast_script",
+  "other",
 ];
 
 const difficultyOptions = [
@@ -1866,10 +2554,11 @@ const difficultyOptions = [
   { id: "advanced", label: "発展" },
 ];
 
+const remoteUrlPattern = /^(?:https?:\/\/|data:|tauri:\/\/|app:\/\/)/i;
 const isRemoteUrl = (value?: string) =>
-  typeof value === "string" && /^(?:https?:\/\/|data:)/.test(value);
+  typeof value === "string" && (remoteUrlPattern.test(value) || value.startsWith("/"));
 
-const accessiblePreviewUrl = (...sources: Array<string | undefined>) =>
+const accessiblePreviewUrl = (...sources: (string | undefined)[]) =>
   sources.find((value) => isRemoteUrl(value));
 
 const detectMaterialType = (file: File): MaterialType => {
@@ -1930,7 +2619,7 @@ const openLocalPath = async (path: string) => {
     }
     return;
   }
-  const { open } = await import("@tauri-apps/api/shell");
+  const { open } = await import("@tauri-apps/plugin-shell");
   await open(path);
 };
 
@@ -2030,6 +2719,7 @@ const MaterialSettingsSurface: Component = () => {
     return accessiblePreviewUrl(
       metadataUrl,
       payloadPreview,
+      entry?.assetPath,
       entry?.storedPath,
       entry?.libraryPath,
       material?.sourcePath,
@@ -2178,6 +2868,7 @@ const MaterialSettingsSurface: Component = () => {
       (material?.metadata?.previewUrl as string | undefined) ?? undefined,
       material?.sourcePath,
       entry?.storedPath,
+      entry?.assetPath,
       entry?.libraryPath,
     );
     if (remote) {
@@ -2749,6 +3440,9 @@ const MaterialSettingsSurface: Component = () => {
 
 const NewLearningSurface: Component = () => {
   const newLearningDraft = useNewLearningDraft();
+  const [pendingQuery, setPendingQuery] = createSignal("");
+  const [searchQuery, setSearchQuery] = createSignal("");
+  const [subjectFilter, setSubjectFilter] = createSignal("all");
   const [sourceLearningId, setSourceLearningId] = createSignal<string>();
   const [selectedMaterialIds, setSelectedMaterialIds] = createSignal<string[]>([]);
   const [selectedContentIds, setSelectedContentIds] = createSignal<string[]>([]);
@@ -2763,12 +3457,25 @@ const NewLearningSurface: Component = () => {
       .replace(/\s+/g, " ")
       .slice(0, 80);
 
-  const [learnings] = createResource(() => true, () => fetchLearnings({ limit: 50 }));
   const activeDraft = () => newLearningDraft.state.draft;
+
+  const [learningSearch] = createResource(
+    () => ({
+      q: searchQuery(),
+      subject: subjectFilter(),
+    }),
+    (params) =>
+      fetchLearnings({
+        q: params.q.trim() || undefined,
+        subject: params.subject === "all" ? undefined : params.subject,
+        limit: 80,
+      }),
+  );
+
   createEffect(() => {
-    const list = learnings();
+    const list = learningSearch();
     if (!list?.length) return;
-    if (sourceLearningId()) return;
+    if (sourceLearningId() && list.some((item) => item.id === sourceLearningId())) return;
     const draft = activeDraft();
     const first = draft && list.some((item) => item.id === draft.sourceLearningId)
       ? draft.sourceLearningId
@@ -2782,9 +3489,18 @@ const NewLearningSurface: Component = () => {
     setSourceLearningId(draft.sourceLearningId);
     setTitle(draft.title);
     setTags(draft.tags.join(", "));
+    if (draft.subject) {
+      setSubjectFilter(draft.subject);
+    }
+    setPendingQuery(draft.title);
+    setSearchQuery(draft.title);
     setHydratedDraftId(draft.createdAt);
     setSelectionDraftId(null);
   });
+
+  const selectedLearning = createMemo(() =>
+    (learningSearch() ?? []).find((learning) => learning.id === sourceLearningId()),
+  );
 
   const [materials] = createResource(
     () => sourceLearningId(),
@@ -2811,6 +3527,15 @@ const NewLearningSurface: Component = () => {
     setSelectionDraftId(draft.createdAt);
   });
 
+  const recommendedMaterials = createMemo(() => {
+    const ids = activeDraft()?.recommendedMaterialIds ?? [];
+    return (materials() ?? []).filter((mat) => ids.includes(mat.id));
+  });
+  const recommendedGenerated = createMemo(() => {
+    const ids = activeDraft()?.recommendedContentIds ?? [];
+    return (generatedContents() ?? []).filter((content) => ids.includes(content.id));
+  });
+
   const toggleSelection = (ids: string[], setIds: (value: string[]) => void, id: string) => {
     if (ids.includes(id)) {
       setIds(ids.filter((item) => item !== id));
@@ -2819,8 +3544,43 @@ const NewLearningSurface: Component = () => {
     }
   };
 
+  const handleSearch = () => {
+    setSearchQuery(pendingQuery().trim());
+  };
+
+  const handleApplyDraftFilters = () => {
+    const draft = activeDraft();
+    if (!draft) return;
+    setPendingQuery(draft.title);
+    setSearchQuery(draft.title);
+    if (draft.subject) {
+      setSubjectFilter(draft.subject);
+    }
+    setSourceLearningId(draft.sourceLearningId);
+    setSelectionDraftId(null);
+  };
+
+  const handleApplyRecommended = () => {
+    const draft = activeDraft();
+    if (!draft) return;
+    setSourceLearningId(draft.sourceLearningId);
+    setSelectionDraftId(null);
+    const mats = materials();
+    const gens = generatedContents();
+    if (mats) {
+      setSelectedMaterialIds(
+        mats.filter((mat) => draft.recommendedMaterialIds.includes(mat.id)).map((mat) => mat.id),
+      );
+    }
+    if (gens) {
+      setSelectedContentIds(
+        gens.filter((content) => draft.recommendedContentIds.includes(content.id)).map((content) => content.id),
+      );
+    }
+  };
+
   const handleCreate = async () => {
-    const source = learnings()?.find((learning) => learning.id === sourceLearningId());
+    const source = learningSearch()?.find((learning) => learning.id === sourceLearningId());
     if (!source) {
       setStatus("抽出元の学習を選択してください。");
       return;
@@ -2890,177 +3650,406 @@ const NewLearningSurface: Component = () => {
           過去教材から新しい学習作成
         </p>
         <h1 class="text-2xl font-bold text-slate-900">
-          既存の教材・生成物を選んで新しいLearningとして保存
+          検索 → 抽出プレビュー → 取捨選択の3ステップで組み立て
         </h1>
-      <p class="text-sm text-slate-600">
-        抽出元のLearningを選び、コピーしたい教材と生成コンテンツにチェックを入れて新規Learningを作成します。
-      </p>
-    </header>
-
-    <Show when={activeDraft()}>
-      {(draft) => (
-        <div class="rounded-xl border border-indigo-200 bg-indigo-50 p-4 text-sm text-indigo-900">
-          <p class="text-xs font-semibold uppercase text-indigo-700">
-            AI抽出済みのドラフト
-          </p>
-          <p class="mt-1 text-base font-semibold text-slate-900">{draft().title}</p>
-          <p class="text-xs text-indigo-700">
-            推薦: 教材 {draft().recommendedMaterialIds.length} 件 / 生成 {draft().recommendedContentIds.length} 件
-          </p>
-          <p class="mt-2 whitespace-pre-wrap text-xs text-slate-700">
-            {draft().reasoning ?? "抽出理由のメモはありません。"}
-          </p>
-          <div class="mt-3 flex flex-wrap gap-2">
-            <button
-              class="rounded-md border border-indigo-200 px-3 py-2 text-xs font-semibold text-indigo-700 hover:bg-white"
-              onClick={() => setSourceLearningId(draft().sourceLearningId)}
-            >
-              提案元のLearningに合わせる
-            </button>
-            <button
-              class="rounded-md border border-transparent px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-white/50"
-              onClick={() => newLearningDraft.clearDraft()}
-            >
-              ドラフトをクリア
-            </button>
-          </div>
-        </div>
-      )}
-    </Show>
-
-    <div class="grid gap-4 md:grid-cols-[0.9fr_1fr_1fr]">
-      <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-        <p class="text-xs font-semibold uppercase text-slate-500">
-          ① 抽出元を選択
+        <p class="text-sm text-slate-600">
+          AIチャットからの抽出ドラフトを受け取り、関連する教材・生成物をプレビューした上でコピー対象を選びます。
         </p>
-          <div class="mt-2 space-y-2 text-sm text-slate-800">
-            <For each={learnings() ?? []}>
-              {(learning) => (
-                <label class="flex items-center gap-2">
-                  <input
-                    type="radio"
-                    name="learning"
-                    checked={learning.id === sourceLearningId()}
-                    onChange={() => setSourceLearningId(learning.id)}
-                  />
-                  <div>
-                    <p class="font-semibold text-slate-900">{learning.title}</p>
-                    <p class="text-xs text-slate-600">
-                      {subjectLabel(learning.subject)} / {learning.tags?.join(", ")}
-                    </p>
-                  </div>
-                </label>
-              )}
-            </For>
-            <Show when={!learnings() || learnings()?.length === 0}>
-              <p class="text-xs text-slate-500">抽出元となるLearningがありません。</p>
-            </Show>
-          </div>
-        </div>
+      </header>
 
-        <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-          <p class="text-xs font-semibold uppercase text-slate-500">
-            ② コピーする教材と生成物
-          </p>
-          <div class="mt-2 space-y-2 text-sm text-slate-800">
-            <p class="text-xs font-semibold text-slate-600">教材</p>
-            <For each={materials() ?? []}>
-              {(material) => (
-                <label class="flex items-start gap-2">
-                  <input
-                    type="checkbox"
-                    checked={selectedMaterialIds().includes(material.id)}
-                    onChange={() =>
-                      toggleSelection(selectedMaterialIds(), setSelectedMaterialIds, material.id)
-                    }
-                  />
-                  <span>
-                    {material.sourcePath ?? material.type.toUpperCase()}
-                    <span class="block text-xs text-slate-600">
-                      {material.rawContent ? summarizeForDisplay(material.rawContent) : material.type}
-                    </span>
-                  </span>
-                </label>
-              )}
-            </For>
-            <Show when={(materials() ?? []).length === 0}>
-              <p class="text-xs text-slate-500">教材がありません。</p>
-            </Show>
-            <p class="pt-2 text-xs font-semibold text-slate-600">生成コンテンツ</p>
-            <For each={generatedContents() ?? []}>
-              {(content) => (
-                <label class="flex items-start gap-2">
-                  <input
-                    type="checkbox"
-                    checked={selectedContentIds().includes(content.id)}
-                    onChange={() =>
-                      toggleSelection(selectedContentIds(), setSelectedContentIds, content.id)
-                    }
-                  />
-                  <span>
-                    {generatedTypeLabels[content.type] ?? content.type}
-                    <span class="block text-xs text-slate-600">
-                      {summarizeForDisplay(content.content)}
-                    </span>
-                  </span>
-                </label>
-              )}
-            </For>
-            <Show when={(generatedContents() ?? []).length === 0}>
-              <p class="text-xs text-slate-500">生成コンテンツがありません。</p>
-            </Show>
-          </div>
-        </div>
-
-        <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-          <p class="text-xs font-semibold uppercase text-slate-500">
-            ③ 新規学習のプレビュー
-          </p>
-          <div class="mt-2 space-y-2 text-sm text-slate-800">
-            <label class="flex flex-col gap-1">
-              <span class="text-xs font-semibold text-slate-600">タイトル</span>
-              <input
-                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
-                value={title()}
-                onInput={(e) => setTitle(e.currentTarget.value)}
-                placeholder="例: 〇〇の復習セット"
-              />
-            </label>
-            <label class="flex flex-col gap-1">
-              <span class="text-xs font-semibold text-slate-600">タグ (カンマ区切り)</span>
-              <input
-                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
-                value={tags()}
-                onInput={(e) => setTags(e.currentTarget.value)}
-                placeholder="二次関数, 復習, 小テスト"
-              />
-            </label>
-            <div class="rounded-lg bg-slate-50 px-3 py-2">
-              <p class="text-xs font-semibold uppercase text-slate-500">
-                コピー対象の概要
-              </p>
-              <ul class="mt-1 list-disc space-y-1 pl-5 text-sm text-slate-700">
-                <li>教材 {selectedMaterialIds().length} 件</li>
-                <li>生成コンテンツ {selectedContentIds().length} 件</li>
-              </ul>
+      <Show when={activeDraft()}>
+        {(draft) => (
+          <div class="rounded-xl border border-indigo-200 bg-indigo-50 p-4 text-sm text-indigo-900">
+            <p class="text-xs font-semibold uppercase text-indigo-700">
+              AI抽出済みのドラフト
+            </p>
+            <p class="mt-1 text-base font-semibold text-slate-900">{draft().title}</p>
+            <p class="text-xs text-indigo-700">
+              推薦: 教材 {draft().recommendedMaterialIds.length} 件 / 生成 {draft().recommendedContentIds.length} 件
+            </p>
+            <p class="mt-2 whitespace-pre-wrap text-xs text-slate-700">
+              {draft().reasoning ?? "抽出理由のメモはありません。"}
+            </p>
+            <div class="mt-3 flex flex-wrap gap-2">
+              <button
+                class="rounded-md border border-indigo-200 px-3 py-2 text-xs font-semibold text-indigo-700 hover:bg-white"
+                onClick={handleApplyDraftFilters}
+              >
+                検索条件と選択をドラフトに寄せる
+              </button>
+              <button
+                class="rounded-md border border-transparent px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-white/50"
+                onClick={() => newLearningDraft.clearDraft()}
+              >
+                ドラフトをクリア
+              </button>
             </div>
           </div>
-          <div class="mt-3 flex gap-2">
-            <button
-              class="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-70"
-              onClick={handleCreate}
-              disabled={isCreating() || !sourceLearningId()}
-            >
-              {isCreating() ? "作成中..." : "学習を作成"}
-            </button>
+        )}
+      </Show>
+
+      <div class="grid gap-4 xl:grid-cols-[1.15fr_1fr]">
+        <div class="space-y-4">
+          <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <p class="text-xs font-semibold uppercase text-slate-500">
+              ① 抽出元を検索
+            </p>
+            <div class="mt-3 space-y-2 text-sm text-slate-800">
+              <div class="flex flex-col gap-2 md:flex-row md:items-center md:gap-3">
+                <input
+                  class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 md:w-72"
+                  placeholder="タイトル・タグ・キーワードで検索"
+                  value={pendingQuery()}
+                  onInput={(event) => setPendingQuery(event.currentTarget.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") handleSearch();
+                  }}
+                />
+                <select
+                  class="rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-800"
+                  value={subjectFilter()}
+                  onChange={(event) => setSubjectFilter(event.currentTarget.value)}
+                >
+                  <For each={subjects}>
+                    {(item) => (
+                      <option value={item.id}>{item.label}</option>
+                    )}
+                  </For>
+                </select>
+                <button
+                  class="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
+                  onClick={handleSearch}
+                  disabled={learningSearch.loading}
+                >
+                  {learningSearch.loading ? "検索中..." : "検索"}
+                </button>
+              </div>
+              <Show when={activeDraft()}>
+                {(draft) => (
+                  <button
+                    class="rounded-md border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-[11px] font-semibold text-indigo-700 transition hover:bg-white"
+                    onClick={handleApplyDraftFilters}
+                  >
+                    AI提案「{draft().title.slice(0, 16)}...」に合わせて絞り込む
+                  </button>
+                )}
+              </Show>
+              <div class="h-px w-full bg-slate-200" />
+              <div class="space-y-2">
+                <For each={learningSearch() ?? []}>
+                  {(learning) => {
+                    const isDraftSource = activeDraft()?.sourceLearningId === learning.id;
+                    return (
+                      <label class="flex gap-3 rounded-lg border border-slate-100 bg-slate-50 px-3 py-2 transition hover:border-indigo-200">
+                        <input
+                          type="radio"
+                          name="learning"
+                          checked={learning.id === sourceLearningId()}
+                          onChange={() => setSourceLearningId(learning.id)}
+                        />
+                        <div class="flex-1 space-y-1">
+                          <div class="flex flex-wrap items-center gap-2">
+                            <p class="font-semibold text-slate-900">{learning.title}</p>
+                            <span class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-700">
+                              {subjectLabel(learning.subject)}
+                            </span>
+                            <span class="text-[11px] text-slate-500">
+                              教材 {learning.materialsCount ?? 0} / 生成 {learning.generatedCount ?? 0}
+                            </span>
+                            <Show when={isDraftSource}>
+                              <span class="rounded-full bg-indigo-100 px-2 py-0.5 text-[11px] font-semibold text-indigo-700">
+                                AI提案の抽出元
+                              </span>
+                            </Show>
+                          </div>
+                          <p class="text-xs text-slate-600">
+                            {(learning.tags ?? []).join(", ") || "タグ未設定"}
+                          </p>
+                        </div>
+                      </label>
+                    );
+                  }}
+                </For>
+                <Show when={!learningSearch() || learningSearch()?.length === 0}>
+                  <p class="text-xs text-slate-500">条件に合致するLearningがありません。</p>
+                </Show>
+              </div>
+            </div>
           </div>
-          <Show when={status()}>
-            {(text) => (
-              <p class="mt-2 text-xs text-slate-700">
-                {text()}
+
+          <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <p class="text-xs font-semibold uppercase text-slate-500">
+              ② 抽出プレビュー
+            </p>
+            <div class="mt-2 space-y-3 text-sm text-slate-800">
+              <div class="flex flex-wrap items-center gap-2">
+                <p class="font-semibold text-slate-900">
+                  選択中: {selectedLearning()?.title ?? "未選択"}
+                </p>
+                <Show when={selectedLearning()}>
+                  {(learning) => (
+                    <span class="rounded-full bg-slate-100 px-2 py-1 text-[11px] font-semibold text-slate-700">
+                      教材 {learning().materialsCount ?? 0} / 生成 {learning().generatedCount ?? 0}
+                    </span>
+                  )}
+                </Show>
+              </div>
+
+              <div class="rounded-lg border border-indigo-100 bg-indigo-50 px-3 py-2">
+                <div class="flex items-center justify-between gap-2">
+                  <p class="text-[11px] font-semibold uppercase text-indigo-700">AI 推薦サマリ</p>
+                  <button
+                    class="rounded-md border border-indigo-200 bg-white px-2 py-1 text-[11px] font-semibold text-indigo-700 hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-60"
+                    onClick={handleApplyRecommended}
+                    disabled={!activeDraft()}
+                  >
+                    推薦を選択に反映
+                  </button>
+                </div>
+                <p class="text-xs text-indigo-800">
+                  教材 {recommendedMaterials().length} 件 / 生成 {recommendedGenerated().length} 件を優先候補として抽出しています。
+                </p>
+                <p class="mt-1 whitespace-pre-wrap text-[11px] text-indigo-700">
+                  {activeDraft()?.reasoning ?? "AIからの抽出メモがまだありません。"}
+                </p>
+              </div>
+
+              <div class="grid gap-3 md:grid-cols-2">
+                <div class="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2">
+                  <div class="flex items-center justify-between text-[11px] font-semibold text-slate-600">
+                    <span>教材プレビュー</span>
+                    <span>{materials()?.length ?? 0} 件</span>
+                  </div>
+                  <div class="mt-2 space-y-2">
+                    <For each={(materials() ?? []).slice(0, 4)}>
+                      {(material) => {
+                        const isRecommended = recommendedMaterials().some((item) => item.id === material.id);
+                        return (
+                          <div class="rounded-md bg-white px-2 py-1">
+                            <div class="flex items-center justify-between gap-2">
+                              <span class="text-sm font-semibold text-slate-900">
+                                {material.sourcePath ?? material.type.toUpperCase()}
+                              </span>
+                              <Show when={isRecommended}>
+                                <span class="rounded-full bg-indigo-100 px-2 py-0.5 text-[11px] font-semibold text-indigo-700">
+                                  推薦
+                                </span>
+                              </Show>
+                            </div>
+                            <p class="text-[11px] text-slate-600">
+                              {material.rawContent ? summarizeForDisplay(material.rawContent) : material.type}
+                            </p>
+                          </div>
+                        );
+                      }}
+                    </For>
+                    <Show when={(materials() ?? []).length === 0}>
+                      <p class="text-xs text-slate-500">この学習には教材がありません。</p>
+                    </Show>
+                  </div>
+                </div>
+                <div class="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2">
+                  <div class="flex items-center justify-between text-[11px] font-semibold text-slate-600">
+                    <span>生成コンテンツプレビュー</span>
+                    <span>{generatedContents()?.length ?? 0} 件</span>
+                  </div>
+                  <div class="mt-2 space-y-2">
+                    <For each={(generatedContents() ?? []).slice(0, 4)}>
+                      {(content) => {
+                        const isRecommended = recommendedGenerated().some((item) => item.id === content.id);
+                        return (
+                          <div class="rounded-md bg-white px-2 py-1">
+                            <div class="flex items-center justify-between gap-2">
+                              <span class="text-sm font-semibold text-slate-900">
+                                {generatedTypeLabels[content.type] ?? content.type}
+                              </span>
+                              <Show when={isRecommended}>
+                                <span class="rounded-full bg-indigo-100 px-2 py-0.5 text-[11px] font-semibold text-indigo-700">
+                                  推薦
+                                </span>
+                              </Show>
+                            </div>
+                            <p class="text-[11px] text-slate-600">
+                              {summarizeForDisplay(content.content)}
+                            </p>
+                          </div>
+                        );
+                      }}
+                    </For>
+                    <Show when={(generatedContents() ?? []).length === 0}>
+                      <p class="text-xs text-slate-500">生成コンテンツがありません。</p>
+                    </Show>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+          <p class="text-xs font-semibold uppercase text-slate-500">
+            ③ 取捨選択と新規Learning
+          </p>
+          <div class="mt-3 space-y-3 text-sm text-slate-800">
+            <div class="flex flex-wrap gap-2">
+              <button
+                class="rounded-md border border-slate-200 px-3 py-1.5 text-[11px] font-semibold text-slate-700 hover:bg-slate-50"
+                onClick={() => {
+                  setSelectedMaterialIds(materials()?.map((item) => item.id) ?? []);
+                  setSelectedContentIds(generatedContents()?.map((item) => item.id) ?? []);
+                }}
+              >
+                すべて選択
+              </button>
+              <button
+                class="rounded-md border border-slate-200 px-3 py-1.5 text-[11px] font-semibold text-slate-700 hover:bg-slate-50"
+                onClick={() => {
+                  setSelectedMaterialIds([]);
+                  setSelectedContentIds([]);
+                  setSelectionDraftId(null);
+                }}
+              >
+                選択をクリア
+              </button>
+              <button
+                class="rounded-md border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-[11px] font-semibold text-indigo-700 hover:bg-white"
+                onClick={handleApplyRecommended}
+                disabled={!activeDraft()}
+              >
+                推薦のみをチェック
+              </button>
+            </div>
+
+            <div class="grid gap-3 md:grid-cols-2">
+              <div class="space-y-2 rounded-lg border border-slate-100 bg-slate-50 px-3 py-2">
+                <p class="text-xs font-semibold text-slate-600">教材</p>
+                <For each={materials() ?? []}>
+                  {(material) => {
+                    const isRecommended = recommendedMaterials().some((item) => item.id === material.id);
+                    return (
+                      <label class="flex items-start gap-2 rounded-md px-1 py-1 hover:bg-white">
+                        <input
+                          type="checkbox"
+                          checked={selectedMaterialIds().includes(material.id)}
+                          onChange={() =>
+                            toggleSelection(selectedMaterialIds(), setSelectedMaterialIds, material.id)
+                          }
+                        />
+                        <div class="space-y-1">
+                          <div class="flex items-center gap-2">
+                            <span class="text-sm font-semibold text-slate-900">
+                              {material.sourcePath ?? material.type.toUpperCase()}
+                            </span>
+                            <Show when={isRecommended}>
+                              <span class="rounded-full bg-indigo-100 px-2 py-0.5 text-[11px] font-semibold text-indigo-700">
+                                推薦
+                              </span>
+                            </Show>
+                          </div>
+                          <p class="text-[11px] text-slate-600">
+                            {material.rawContent ? summarizeForDisplay(material.rawContent) : material.type}
+                          </p>
+                        </div>
+                      </label>
+                    );
+                  }}
+                </For>
+                <Show when={(materials() ?? []).length === 0}>
+                  <p class="text-xs text-slate-500">教材がありません。</p>
+                </Show>
+              </div>
+
+              <div class="space-y-2 rounded-lg border border-slate-100 bg-slate-50 px-3 py-2">
+                <p class="text-xs font-semibold text-slate-600">生成コンテンツ</p>
+                <For each={generatedContents() ?? []}>
+                  {(content) => {
+                    const isRecommended = recommendedGenerated().some((item) => item.id === content.id);
+                    return (
+                      <label class="flex items-start gap-2 rounded-md px-1 py-1 hover:bg-white">
+                        <input
+                          type="checkbox"
+                          checked={selectedContentIds().includes(content.id)}
+                          onChange={() =>
+                            toggleSelection(selectedContentIds(), setSelectedContentIds, content.id)
+                          }
+                        />
+                        <div class="space-y-1">
+                          <div class="flex items-center gap-2">
+                            <span class="text-sm font-semibold text-slate-900">
+                              {generatedTypeLabels[content.type] ?? content.type}
+                            </span>
+                            <Show when={isRecommended}>
+                              <span class="rounded-full bg-indigo-100 px-2 py-0.5 text-[11px] font-semibold text-indigo-700">
+                                推薦
+                              </span>
+                            </Show>
+                          </div>
+                          <p class="text-[11px] text-slate-600">
+                            {summarizeForDisplay(content.content)}
+                          </p>
+                        </div>
+                      </label>
+                    );
+                  }}
+                </For>
+                <Show when={(generatedContents() ?? []).length === 0}>
+                  <p class="text-xs text-slate-500">生成コンテンツがありません。</p>
+                </Show>
+              </div>
+            </div>
+
+            <div class="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2">
+              <p class="text-xs font-semibold uppercase text-slate-500">
+                新規学習のプレビュー
               </p>
-            )}
-          </Show>
+              <div class="mt-2 space-y-2">
+                <label class="flex flex-col gap-1">
+                  <span class="text-xs font-semibold text-slate-600">タイトル</span>
+                  <input
+                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+                    value={title()}
+                    onInput={(e) => setTitle(e.currentTarget.value)}
+                    placeholder="例: 〇〇の復習セット"
+                  />
+                </label>
+                <label class="flex flex-col gap-1">
+                  <span class="text-xs font-semibold text-slate-600">タグ (カンマ区切り)</span>
+                  <input
+                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+                    value={tags()}
+                    onInput={(e) => setTags(e.currentTarget.value)}
+                    placeholder="二次関数, 復習, 小テスト"
+                  />
+                </label>
+                <div class="rounded-lg bg-white px-3 py-2">
+                  <p class="text-xs font-semibold uppercase text-slate-500">
+                    コピー対象の概要
+                  </p>
+                  <ul class="mt-1 list-disc space-y-1 pl-5 text-sm text-slate-700">
+                    <li>教材 {selectedMaterialIds().length} 件</li>
+                    <li>生成コンテンツ {selectedContentIds().length} 件</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+
+            <div class="flex gap-2">
+              <button
+                class="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-70"
+                onClick={handleCreate}
+                disabled={isCreating() || !sourceLearningId()}
+              >
+                {isCreating() ? "作成中..." : "学習を作成"}
+              </button>
+            </div>
+            <Show when={status()}>
+              {(text) => (
+                <p class="text-xs text-slate-700">
+                  {text()}
+                </p>
+              )}
+            </Show>
+          </div>
         </div>
       </div>
     </section>

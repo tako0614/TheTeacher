@@ -58,6 +58,7 @@ export const ingestStepSchema = z.object({
 
 export const ingestJobSchema = z.object({
   id: z.string().uuid(),
+  userId: z.string().uuid().optional(),
   learningId: z.string().uuid().optional(),
   source: ingestSourceSchema,
   status: z.enum(["queued", "processing", "completed", "failed"]),
@@ -79,8 +80,10 @@ export const libraryConfigSchema = z.object({
 
 export const libraryEntrySchema = z.object({
   id: z.string().uuid(),
+  userId: z.string().uuid().optional(),
   displayName: z.string().min(1),
   storedPath: z.string().min(1),
+  assetPath: z.string().min(1).optional(),
   type: materialTypeSchema,
   bytes: z.number().int().nonnegative().optional(),
   learningId: z.string().uuid().optional(),

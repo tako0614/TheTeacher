@@ -1,4 +1,3 @@
-import { appDataDir, join } from "@tauri-apps/api/path";
 import {
   type IngestJob,
   type IngestSource,
@@ -71,7 +70,7 @@ const stepTemplates: Record<
   pdf: [
     {
       id: "download",
-      label: "ローカル保存",
+      label: "クラウド保存",
       kind: "download",
       status: "pending",
     },
@@ -83,7 +82,7 @@ const stepTemplates: Record<
   image: [
     {
       id: "download",
-      label: "ローカル保存",
+      label: "クラウド保存",
       kind: "download",
       status: "pending",
     },
@@ -94,7 +93,7 @@ const stepTemplates: Record<
   audio: [
     {
       id: "download",
-      label: "ローカル保存",
+      label: "クラウド保存",
       kind: "download",
       status: "pending",
     },
@@ -110,7 +109,7 @@ const stepTemplates: Record<
   video: [
     {
       id: "download",
-      label: "ローカル保存",
+      label: "クラウド保存",
       kind: "download",
       status: "pending",
     },
@@ -137,7 +136,7 @@ const stepTemplates: Record<
   fallback: [
     {
       id: "download",
-      label: "ローカル保存",
+      label: "クラウド保存",
       kind: "download",
       status: "pending",
     },
@@ -146,20 +145,11 @@ const stepTemplates: Record<
 };
 
 export const resolveLibraryConfig = async (): Promise<MaterialLibraryConfig> => {
-  try {
-    const base = await appDataDir();
-    return {
-      rootDir: await join(base, "TheTeacher", "materials"),
-      tempDir: await join(base, "TheTeacher", "materials", "tmp"),
-      indexFile: await join(base, "TheTeacher", "materials", "material-index.json"),
-    };
-  } catch {
-    return {
-      rootDir: ".theteacher/materials",
-      tempDir: ".theteacher/materials/tmp",
-      indexFile: ".theteacher/materials/material-index.json",
-    };
-  }
+  return {
+    rootDir: "/api/materials/library",
+    tempDir: "/api/materials/library/tmp",
+    indexFile: "/api/materials/library/material-index.json",
+  };
 };
 
 export const bootstrapJobFromRequest = (
@@ -189,8 +179,9 @@ export const sampleLibraryEntries: MaterialLibraryEntry[] = [
   {
     id: "00000000-0000-0000-0000-000000000001",
     displayName: "二次関数_講義スライド.pdf",
-    storedPath: "TheTeacher/materials/math/quadratic.pdf",
-    libraryPath: "math/quadratic.pdf",
+    storedPath: "materials/math/quadratic.pdf",
+    assetPath: "/sample/materials/math/quadratic.pdf",
+    libraryPath: "materials/math/quadratic.pdf",
     learningId: "11111111-1111-1111-1111-111111111111",
     materialId: "22222222-2222-2222-2222-222222222221",
     type: "pdf",
@@ -201,8 +192,9 @@ export const sampleLibraryEntries: MaterialLibraryEntry[] = [
   {
     id: "00000000-0000-0000-0000-000000000002",
     displayName: "板書_スクショ.png",
-    storedPath: "TheTeacher/materials/math/board.png",
-    libraryPath: "math/board.png",
+    storedPath: "materials/math/board.png",
+    assetPath: "/sample/materials/math/board.png",
+    libraryPath: "materials/math/board.png",
     learningId: "11111111-1111-1111-1111-111111111111",
     materialId: "22222222-2222-2222-2222-222222222222",
     type: "image",
@@ -213,8 +205,9 @@ export const sampleLibraryEntries: MaterialLibraryEntry[] = [
   {
     id: "00000000-0000-0000-0000-000000000003",
     displayName: "Podcast_試作.wav",
-    storedPath: "TheTeacher/materials/audio/podcast.wav",
-    libraryPath: "audio/podcast.wav",
+    storedPath: "materials/audio/podcast.wav",
+    assetPath: "/sample/materials/audio/podcast.wav",
+    libraryPath: "materials/audio/podcast.wav",
     learningId: "11111111-1111-1111-1111-111111111111",
     materialId: "22222222-2222-2222-2222-222222222223",
     type: "audio",

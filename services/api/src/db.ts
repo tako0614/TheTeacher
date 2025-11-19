@@ -3,12 +3,14 @@ import {
   type IngestJob,
   type MaterialLibraryEntry,
   type MaterialType,
+  type SemanticNode,
 } from "@theteacher/shared";
 
 type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 
 export interface LearningRow {
   id: string;
+  userId: string;
   title: string;
   subject?: string | null;
   tags?: string | null;
@@ -19,6 +21,7 @@ export interface LearningRow {
 
 export interface MaterialRow {
   id: string;
+  userId: string;
   learningId: string;
   type: MaterialType;
   sourcePath?: string | null;
@@ -30,6 +33,7 @@ export interface MaterialRow {
 
 export interface GeneratedContentRow {
   id: string;
+  userId: string;
   learningId: string;
   materialId?: string | null;
   type: GeneratedContentType;
@@ -40,6 +44,7 @@ export interface GeneratedContentRow {
 
 export interface PracticeSessionRow {
   id: string;
+  userId: string;
   learningId: string;
   generatedContentId?: string | null;
   questionRef?: string | null;
@@ -52,6 +57,7 @@ export interface PracticeSessionRow {
 
 export interface PresetRow {
   id: string;
+  userId: string;
   subject: string;
   title: string;
   systemPrompt: string;
@@ -84,8 +90,10 @@ export interface IngestJobRow {
 
 export interface LibraryEntryRow {
   id: string;
+  userId?: string | null;
   displayName: string;
   storedPath: string;
+  assetPath?: string | null;
   libraryPath?: string | null;
   type: MaterialType;
   bytes?: number | null;
@@ -93,6 +101,35 @@ export interface LibraryEntryRow {
   materialId?: string | null;
   originalSource?: string | null;
   notes?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SemanticNodeRow {
+  id: string;
+  userId: string;
+  refType: SemanticNode["refType"];
+  refId: string;
+  embedding?: string | null;
+  metadata?: string | null;
+}
+
+export interface UserRow {
+  id: string;
+  email?: string | null;
+  displayName?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  lastSeenAt?: string | null;
+}
+
+export interface UserSessionRow {
+  id: string;
+  userId: string;
+  tokenHash: string;
+  deviceName?: string | null;
+  lastSeenAt?: string | null;
+  expiresAt?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -123,8 +160,10 @@ export const mapIngestJob = (row: IngestJobRow): IngestJob => ({
 
 export const mapLibraryEntry = (row: LibraryEntryRow): MaterialLibraryEntry => ({
   id: row.id,
+  userId: row.userId ?? undefined,
   displayName: row.displayName,
   storedPath: row.storedPath,
+  assetPath: row.assetPath ?? undefined,
   libraryPath: row.libraryPath ?? undefined,
   type: row.type,
   bytes: typeof row.bytes === "number" ? row.bytes : undefined,
@@ -137,3 +176,22 @@ export const mapLibraryEntry = (row: LibraryEntryRow): MaterialLibraryEntry => (
 });
 
 export const toJson = (value?: unknown) => (value === undefined ? null : JSON.stringify(value));
+
+export const mapUser = (row: UserRow) => ({
+  id: row.id,
+  email: row.email ?? undefined,
+  displayName: row.displayName ?? undefined,
+  createdAt: row.createdAt,
+  updatedAt: row.updatedAt,
+  lastSeenAt: row.lastSeenAt ?? undefined,
+});
+
+export const mapUserSession = (row: UserSessionRow) => ({
+  id: row.id,
+  userId: row.userId,
+  deviceName: row.deviceName ?? undefined,
+  lastSeenAt: row.lastSeenAt ?? undefined,
+  expiresAt: row.expiresAt ?? undefined,
+  createdAt: row.createdAt,
+  updatedAt: row.updatedAt,
+});

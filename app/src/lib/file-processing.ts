@@ -84,12 +84,20 @@ export const processMaterialFile = async (
 
   if (type === "pdf") {
     const text = await extractPdfText(file);
-    return {
+    const payload: ProcessedMaterial = {
       text: summarize(text || `[pdf] ${file.name}`),
       fileName: file.name,
       bytes: file.size,
       mimeType: file.type || "application/pdf",
     };
+    if (file.size <= MAX_DATA_URL_BYTES) {
+      try {
+        payload.dataUrl = await readFileAsDataUrl(file);
+      } catch (error) {
+        console.warn("failed to capture pdf data url", error);
+      }
+    }
+    return payload;
   }
 
   if (type === "image") {

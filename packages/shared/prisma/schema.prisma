@@ -7,9 +7,46 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+/// アカウント
+model User {
+  id                String             @id @default(uuid())
+  email             String?            @unique
+  displayName       String?
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  lastSeenAt        DateTime?
+  sessions          UserSession[]
+  learnings         Learning[]
+  materials         Material[]
+  generatedContents GeneratedContent[]
+  practiceSessions  PracticeSession[]
+  presets           Preset[]
+  semanticNodes     SemanticNode[]
+
+  @@index([createdAt])
+  @@index([updatedAt])
+}
+
+/// デバイス/セッション
+model UserSession {
+  id         String   @id @default(uuid())
+  userId     String
+  tokenHash  String   @unique
+  deviceName String?
+  lastSeenAt DateTime?
+  expiresAt  DateTime?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
 /// 学習ユニット
 model Learning {
   id                String             @id @default(uuid())
+  userId            String
   title             String
   subject           String?
   tags              Json?
@@ -19,7 +56,9 @@ model Learning {
   materials         Material[]
   generatedContents GeneratedContent[]
   practiceSessions  PracticeSession[]
+  user              User               @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  @@index([userId])
   @@index([subject])
   @@index([createdAt])
   @@index([updatedAt])
@@ -28,6 +67,7 @@ model Learning {
 /// 教材メタ
 model Material {
   id         String    @id @default(uuid())
+  userId     String
   learningId String
   type       MaterialType
   sourcePath String?
@@ -36,8 +76,10 @@ model Material {
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
   learning   Learning  @relation(fields: [learningId], references: [id], onDelete: Cascade)
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   generated  GeneratedContent[]
 
+  @@index([userId])
   @@index([learningId])
   @@index([type])
 }
@@ -45,6 +87,7 @@ model Material {
 /// 生成コンテンツ（Q&A、要約など）
 model GeneratedContent {
   id           String                @id @default(uuid())
+  userId       String
   learningId   String
   materialId   String?
   type         GeneratedContentType
@@ -53,8 +96,10 @@ model GeneratedContent {
   createdAt    DateTime              @default(now())
   learning     Learning              @relation(fields: [learningId], references: [id], onDelete: Cascade)
   material     Material?             @relation(fields: [materialId], references: [id], onDelete: SetNull)
+  user         User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
   sessions     PracticeSession[]
 
+  @@index([userId])
   @@index([learningId])
   @@index([type])
   @@index([materialId])
@@ -63,6 +108,7 @@ model GeneratedContent {
 /// 演習履歴
 model PracticeSession {
   id                 String            @id @default(uuid())
+  userId             String
   learningId         String
   generatedContentId String?
   questionRef        Json?
@@ -73,7 +119,9 @@ model PracticeSession {
   createdAt          DateTime          @default(now())
   learning           Learning          @relation(fields: [learningId], references: [id], onDelete: Cascade)
   generatedContent   GeneratedContent? @relation(fields: [generatedContentId], references: [id], onDelete: SetNull)
+  user               User              @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  @@index([userId])
   @@index([learningId])
   @@index([generatedContentId])
   @@index([createdAt])
@@ -82,25 +130,31 @@ model PracticeSession {
 /// プロンプトプリセット
 model Preset {
   id                      String   @id @default(uuid())
+  userId                  String
   subject                 String
   title                   String
   systemPrompt            String
   userInstructionTemplate String
   createdAt               DateTime @default(now())
   updatedAt               DateTime @updatedAt
+  user                    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  @@index([userId])
   @@index([subject])
   @@index([title])
 }
 
 /// セマンティックノード（将来的な拡張）
 model SemanticNode {
-  id       String     @id @default(uuid())
-  refType  RefType
-  refId    String
+  id        String     @id @default(uuid())
+  userId    String
+  refType   RefType
+  refId     String
   embedding Bytes?
-  metadata Json?
+  metadata  Json?
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  @@index([userId])
   @@index([refType])
   @@index([refId])
 }

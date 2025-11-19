@@ -1,3 +1,5 @@
+import type { GeneratedContentType } from "@theteacher/shared";
+
 import { requestJson } from "./http";
 
 export type ToolCallLog = {
@@ -12,13 +14,37 @@ export type SemanticMatch = {
   excerpt: string;
   score: number;
   refType: string;
+  refId?: string;
   subject?: string;
+};
+
+export type SemanticSearchOptions = {
+  refType?: string;
+  subject?: string;
+};
+
+export type GeneratedSummary = {
+  id: string;
+  type: GeneratedContentType;
+  title: string;
+  learningId?: string;
+  learningTitle?: string;
+};
+
+export type ProxyActions = {
+  createdLearningId?: string;
+  createdLearningTitle?: string;
+  createdLearningSubject?: string;
+  createdLearningReason?: string;
+  generatedContentSummaries?: GeneratedSummary[];
 };
 
 export type ChatReply = {
   reply: string;
   toolCalls: ToolCallLog[];
   related: SemanticMatch[];
+  intent?: "search" | "create_learning" | "generate_content";
+  actions?: ProxyActions;
 };
 
 export type ToolName =
@@ -40,6 +66,7 @@ const fallbackMatches: SemanticMatch[] = [
     score: 0.85,
     refType: "learning",
     subject: "math",
+    refId: "local-1",
   },
   {
     id: "local-2",
@@ -48,6 +75,7 @@ const fallbackMatches: SemanticMatch[] = [
     score: 0.8,
     refType: "generated_content",
     subject: "math",
+    refId: "local-2",
   },
   {
     id: "local-3",
@@ -56,6 +84,7 @@ const fallbackMatches: SemanticMatch[] = [
     score: 0.72,
     refType: "generated_content",
     subject: "english",
+    refId: "local-3",
   },
 ];
 
@@ -66,12 +95,24 @@ const normalizeMatches = (matches: SemanticMatch[] | undefined) =>
     excerpt: match.excerpt,
     score: Number(match.score ?? 0),
     refType: match.refType,
+    refId: match.refId,
     subject: match.subject,
   })) ?? [];
+
+const applySemanticFilters = (
+  matches: SemanticMatch[],
+  options?: SemanticSearchOptions,
+) =>
+  matches.filter((match) => {
+    if (options?.refType && match.refType !== options.refType) return false;
+    if (options?.subject && match.subject && match.subject !== options.subject) return false;
+    return true;
+  });
 
 export const semanticSearch = async (
   query: string,
   topK = 5,
+  options?: SemanticSearchOptions,
 ): Promise<SemanticMatch[]> => {
   if (!query.trim()) return [];
 
@@ -79,16 +120,18 @@ export const semanticSearch = async (
     const data = await requestJson<{ results: SemanticMatch[] }>({
       path: "/search/semantic",
       method: "POST",
-      body: { query, topK },
+      body: { query, topK, refType: options?.refType, subject: options?.subject },
     });
-    return normalizeMatches(data.results);
+    return applySemanticFilters(normalizeMatches(data.results), options);
   } catch (error) {
     console.warn("semantic search fell back to local mock", error);
-    return fallbackMatches
-      .filter((match) =>
+    const filtered = applySemanticFilters(
+      fallbackMatches.filter((match) =>
         match.label.toLowerCase().includes(query.toLowerCase()),
-      )
-      .slice(0, topK);
+      ),
+      options,
+    );
+    return filtered.slice(0, topK);
   }
 };
 
@@ -105,6 +148,8 @@ export const proxyChat = async (
       message: string;
       toolCalls?: ToolCallLog[];
       related?: SemanticMatch[];
+      intent?: ChatReply["intent"];
+      actions?: ProxyActions;
     }>({
       path: "/ai/proxy",
       method: "POST",
@@ -120,6 +165,8 @@ export const proxyChat = async (
       reply: data.message ?? "応答が空でした。",
       toolCalls: data.toolCalls ?? [],
       related: normalizeMatches(data.related),
+      intent: data.intent,
+      actions: data.actions,
     };
   } catch (error) {
     console.warn("proxy chat fell back to local mock", error);
@@ -134,6 +181,7 @@ export const proxyChat = async (
         },
       ],
       related: fallbackMatches.slice(0, opts?.topK ?? 3),
+      intent: "search",
     };
   }
 };

@@ -67,6 +67,8 @@ const summarizeMatches = (matches: SemanticMatch[]) =>
     .map((hit) => `- ${hit.label}: ${hit.excerpt.slice(0, 60)}`)
     .join("\n");
 
+const refIdOf = (hit: SemanticMatch) => hit.refId ?? hit.id;
+
 export const createNewLearningDraftStore = () => {
   const [state, setState] = createStore<DraftState>(defaultState);
 
@@ -86,11 +88,12 @@ export const createNewLearningDraftStore = () => {
   const seedDraftFromMatches = (matches: SemanticMatch[], overrides?: DraftSeedOverrides) => {
     if (!matches.length && !overrides?.sourceLearningId) return null;
     const preferred = overrides?.sourceLearningId
-      ? matches.find((hit) => hit.id === overrides.sourceLearningId && hit.refType === "learning")
+      ? matches.find(
+          (hit) => refIdOf(hit) === overrides.sourceLearningId && hit.refType === "learning",
+        )
       : undefined;
-    const learningHit =
-      preferred ?? matches.find((hit) => hit.refType === "learning");
-    const sourceLearningId = overrides?.sourceLearningId ?? learningHit?.id ?? "";
+    const learningHit = preferred ?? matches.find((hit) => hit.refType === "learning");
+    const sourceLearningId = overrides?.sourceLearningId ?? (learningHit ? refIdOf(learningHit) : "");
     if (!sourceLearningId) {
       return null;
     }
@@ -106,10 +109,10 @@ export const createNewLearningDraftStore = () => {
       reasoning: overrides?.reasoning ?? summarizeMatches(matches),
       recommendedMaterialIds: matches
         .filter((hit) => hit.refType === "material")
-        .map((hit) => hit.id),
+        .map((hit) => refIdOf(hit)),
       recommendedContentIds: matches
         .filter((hit) => hit.refType === "generated_content")
-        .map((hit) => hit.id),
+        .map((hit) => refIdOf(hit)),
       createdAt: nowIso(),
     };
 

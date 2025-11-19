@@ -1,6 +1,11 @@
+import { randomUUID } from "node:crypto";
+
+import type { IngestJob } from "@theteacher/shared";
 import { describe, expect, it } from "vitest";
 
-import { app } from "./index";
+import { app, __ingestTestHelpers } from "./index";
+
+const { chunkMaterialText, attachEmbeddingsToChunks, prepareJobForProcessing } = __ingestTestHelpers;
 
 describe("api worker", () => {
   it("responds to /health", async () => {
@@ -23,6 +28,25 @@ describe("api worker", () => {
     expect(json.request.prompt).toBe("二次関数の復習");
     expect(json.toolCalls.length).toBeGreaterThan(0);
     expect(json.related.length).toBeGreaterThan(0);
+    expect(json.intent).toBeDefined();
+    expect(json.message.length).toBeGreaterThan(0);
+    expect(json.actions).toBeTypeOf("object");
+  });
+
+  it("grades practice answers with fallback when no model is configured", async () => {
+    const res = await app.request("/ai/practice/grade", {
+      method: "POST",
+      body: JSON.stringify({
+        question: { prompt: "2 + 2 は？", expected: "4", hint: "簡単な足し算" },
+        answer: "4",
+        mode: "text",
+      }),
+    });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.feedback.score).toBeGreaterThanOrEqual(0);
+    expect(["correct", "partial", "incorrect"]).toContain(json.feedback.verdict);
+    expect(typeof json.feedback.comment).toBe("string");
   });
 
   it("generates embeddings with a deterministic dimension", async () => {
@@ -64,5 +88,38 @@ describe("api worker", () => {
     expect(json.tool).toBe("search_learnings");
     expect(Array.isArray(json.result.items)).toBe(true);
     expect(json.result.items.length).toBeGreaterThan(0);
+  });
+
+  it("chunks long text and attaches embeddings", async () => {
+    const payload = Array.from({ length: 40 }, (_, idx) => `Sentence number ${idx + 1}.`).join(" ");
+    const chunks = chunkMaterialText(payload, { targetTokens: 10, maxTokens: 20 });
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks[0].order).toBe(0);
+    expect(chunks.every((chunk, index) => chunk.order === index)).toBe(true);
+    const { chunks: withEmbeddings, dimension } = await attachEmbeddingsToChunks(chunks);
+    expect(withEmbeddings[0].embedding).toBeDefined();
+    expect(withEmbeddings[0].embedding?.length).toBe(dimension);
+  });
+
+  it("marks preprocessing steps as succeeded when preparing ingest jobs", () => {
+    const now = new Date().toISOString();
+    const job: IngestJob = {
+      id: randomUUID(),
+      learningId: randomUUID(),
+      source: { kind: "text", text: "demo" } as const,
+      status: "queued" as const,
+      steps: [
+        { id: "download", label: "download", kind: "download", status: "pending" as const },
+        { id: "chunk", label: "chunk", kind: "chunking", status: "pending" as const },
+        { id: "embed", label: "embed", kind: "embedding", status: "pending" as const },
+      ],
+      requestedAt: now,
+      updatedAt: now,
+    };
+    const prepared = prepareJobForProcessing(job);
+    expect(prepared.status).toBe("processing");
+    expect(prepared.steps[0].status).toBe("succeeded");
+    expect(prepared.steps[1].status).toBe("running");
+    expect(prepared.steps[2].status).toBe("pending");
   });
 });

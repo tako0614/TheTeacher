@@ -10,6 +10,8 @@ import {
 export const generateFromMaterialRequestSchema = z.object({
   learningId: z.string().uuid(),
   materialId: z.string().uuid().optional(),
+  materialText: z.string().trim().min(1).max(16_000).optional(),
+  materialTitle: z.string().trim().min(1).max(120).optional(),
   types: z.array(generatedContentTypeSchema).min(1).default(["qa"]),
   presetId: z.string().uuid().optional(),
   presetTitle: z.string().min(1).optional(),

@@ -11,3 +11,8 @@ Edge worker that proxies AI calls and hosts embedding/search endpoints reference
 1. Initialize Wrangler project with Hono entrypoint and staging config.
 2. Define simple `/health` and placeholder `/ai/proxy` routes.
 3. Add schema validations using shared types once `packages/shared` exports them.
+
+## Runtime bindings
+- `DB` (D1): primary metadata store.
+- `MATERIALS_BUCKET` (R2): persists uploaded material binaries.
+- `MATERIALS_KV`: index of material asset keys and metadata for quick lookups.

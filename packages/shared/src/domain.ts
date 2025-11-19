@@ -26,8 +26,28 @@ export const refTypeSchema = z.enum([
   "question",
 ]);
 
+export const userSchema = z.object({
+  id: z.string().uuid(),
+  email: z.string().email().optional(),
+  displayName: z.string().min(1).optional(),
+  createdAt: isoDateTimeString,
+  updatedAt: isoDateTimeString,
+  lastSeenAt: isoDateTimeString.optional(),
+});
+
+export const userSessionSchema = z.object({
+  id: z.string().uuid(),
+  userId: z.string().uuid(),
+  deviceName: z.string().min(1).optional(),
+  expiresAt: isoDateTimeString.optional(),
+  lastSeenAt: isoDateTimeString.optional(),
+  createdAt: isoDateTimeString,
+  updatedAt: isoDateTimeString,
+});
+
 export const learningSchema = z.object({
   id: z.string().uuid(),
+  userId: z.string().uuid().optional(),
   title: z.string().min(1),
   subject: z.string().min(1).optional(),
   tags: z.array(z.string().min(1)).optional(),
@@ -38,6 +58,7 @@ export const learningSchema = z.object({
 
 export const materialSchema = z.object({
   id: z.string().uuid(),
+  userId: z.string().uuid().optional(),
   learningId: z.string().uuid(),
   type: materialTypeSchema,
   sourcePath: z.string().url().or(z.string().min(1)).optional(),
@@ -49,6 +70,7 @@ export const materialSchema = z.object({
 
 export const generatedContentSchema = z.object({
   id: z.string().uuid(),
+  userId: z.string().uuid().optional(),
   learningId: z.string().uuid(),
   materialId: z.string().uuid().optional(),
   type: generatedContentTypeSchema,
@@ -59,6 +81,7 @@ export const generatedContentSchema = z.object({
 
 export const practiceSessionSchema = z.object({
   id: z.string().uuid(),
+  userId: z.string().uuid().optional(),
   learningId: z.string().uuid(),
   generatedContentId: z.string().uuid().optional(),
   questionRef: z.record(z.string(), z.unknown()).optional(),
@@ -71,6 +94,7 @@ export const practiceSessionSchema = z.object({
 
 export const presetSchema = z.object({
   id: z.string().uuid(),
+  userId: z.string().uuid().optional(),
   subject: z.string().min(1),
   title: z.string().min(1),
   systemPrompt: z.string().min(1),
@@ -81,6 +105,7 @@ export const presetSchema = z.object({
 
 export const semanticNodeSchema = z.object({
   id: z.string().uuid(),
+  userId: z.string().uuid().optional(),
   refType: refTypeSchema,
   refId: z.string().uuid(),
   embedding: z.array(z.number()).optional(),
@@ -88,6 +113,8 @@ export const semanticNodeSchema = z.object({
 });
 
 export const schemas = {
+  user: userSchema,
+  userSession: userSessionSchema,
   learning: learningSchema,
   material: materialSchema,
   generatedContent: generatedContentSchema,
@@ -96,6 +123,8 @@ export const schemas = {
   semanticNode: semanticNodeSchema,
 };
 
+export type User = z.infer<typeof userSchema>;
+export type UserSession = z.infer<typeof userSessionSchema>;
 export type Learning = z.infer<typeof learningSchema>;
 export type Material = z.infer<typeof materialSchema>;
 export type GeneratedContent = z.infer<typeof generatedContentSchema>;

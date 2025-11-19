@@ -7,3 +7,11 @@ compatibility_flags = ["nodejs_compat"]
 binding = "DB"
 database_name = "theteacher-db"
 database_id = "theteacher-db"
+
+[[r2_buckets]]
+binding = "MATERIALS_BUCKET"
+bucket_name = "theteacher-materials"
+
+[[kv_namespaces]]
+binding = "MATERIALS_KV"
+id = "theteacher-materials-kv"

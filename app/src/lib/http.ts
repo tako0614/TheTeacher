@@ -1,3 +1,5 @@
+import { ensureSessionToken, readSessionToken } from "./auth";
+
 const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL?.replace(/\/+$/, "") ?? "http://127.0.0.1:8787";
 
@@ -12,6 +14,7 @@ export type RequestConfig = {
   query?: Record<string, string | number | undefined>;
   body?: unknown;
   headers?: Record<string, string>;
+  skipAuth?: boolean;
 };
 
 const buildUrl = (path: string, query?: RequestConfig["query"]) => {
@@ -24,11 +27,21 @@ const buildUrl = (path: string, query?: RequestConfig["query"]) => {
 };
 
 export const requestJson = async <T>(config: RequestConfig): Promise<T> => {
+  let token = readSessionToken();
+  if (!token && !config.skipAuth) {
+    try {
+      token = await ensureSessionToken();
+    } catch (error) {
+      console.warn("Failed to bootstrap session token", error);
+    }
+  }
+
   const url = buildUrl(config.path, config.query);
   const method = config.method ?? "GET";
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...(config.headers ?? {}),
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
   };
   const body = config.body ? JSON.stringify(config.body) : undefined;
 
