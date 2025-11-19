@@ -2,6 +2,7 @@ import type {
   GeneratedContent,
   Learning,
   Material,
+  MaterialLibraryEntry,
   PracticeSession,
   Preset,
   type GenerateFromMaterialRequest,
@@ -65,6 +66,17 @@ export const deleteLearning = async (id: string) =>
 export const fetchMaterials = async (learningId: string) =>
   requestJson<{ items: Material[] }>({ path: `/api/learnings/${learningId}/materials` });
 
+export const fetchMaterialLibrary = async (params?: {
+  learningId?: string;
+  limit?: number;
+}) => {
+  const { items } = await requestJson<{ items: MaterialLibraryEntry[] }>({
+    path: "/api/materials/library",
+    query: { learningId: params?.learningId, limit: params?.limit },
+  });
+  return items;
+};
+
 export const ingestMaterial = async (
   input: MaterialIngestRequest & { learningId: string },
 ) =>
@@ -88,6 +100,9 @@ export const updateMaterial = async (
     method: "PUT",
     body: input,
   });
+
+export const deleteMaterial = async (id: string) =>
+  requestJson<{ ok: boolean }>({ path: `/api/materials/${id}`, method: "DELETE" });
 
 export const fetchContents = async (learningId: string) =>
   requestJson<{ items: GeneratedContent[] }>({

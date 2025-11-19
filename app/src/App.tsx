@@ -8,6 +8,7 @@ import {
 } from "solid-js";
 
 import { SettingsProvider } from "./lib/settings-store";
+import { NewLearningDraftProvider } from "./lib/new-learning-draft-store";
 import { surfaces } from "./surfaces";
 
 const Nav: Component<{ activePath: Accessor<string> }> = (props) => (
@@ -76,14 +77,16 @@ const AppShell: ParentComponent = (props) => {
 
 const App: Component = () => (
   <SettingsProvider>
-    <Router root={AppShell}>
-      <For each={surfaces}>
-        {(surface) => (
-          <Route path={surface.path} component={surface.component} />
-        )}
-      </For>
-      <Route path="*" component={surfaces[0].component} />
-    </Router>
+    <NewLearningDraftProvider>
+      <Router root={AppShell}>
+        <For each={surfaces}>
+          {(surface) => (
+            <Route path={surface.path} component={surface.component} />
+          )}
+        </For>
+        <Route path="*" component={surfaces[0].component} />
+      </Router>
+    </NewLearningDraftProvider>
   </SettingsProvider>
 );
 

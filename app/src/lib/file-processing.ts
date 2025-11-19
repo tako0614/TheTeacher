@@ -10,6 +10,7 @@ if (GlobalWorkerOptions) {
 }
 
 const MAX_DATA_URL_BYTES = 512_000;
+const MAX_AUDIO_VIDEO_BYTES = 25 * 1024 * 1024;
 const MAX_PDF_PAGES = 8;
 
 export type ProcessedMaterial = {
@@ -118,12 +119,28 @@ export const processMaterialFile = async (
   }
 
   if (type === "audio" || type === "video") {
-    return {
-      text: `[${type}] ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`,
+    if (file.size > MAX_AUDIO_VIDEO_BYTES) {
+      throw new Error(
+        `ファイルサイズが大きすぎます (${(file.size / 1024 / 1024).toFixed(1)} MB)。${(
+          MAX_AUDIO_VIDEO_BYTES / 1024 / 1024
+        ).toFixed(0)}MB 以内にしてください。`,
+      );
+    }
+
+    const payload: ProcessedMaterial = {
       fileName: file.name,
       bytes: file.size,
       mimeType: file.type || `${type}/*`,
     };
+
+    try {
+      payload.dataUrl = await readFileAsDataUrl(file);
+    } catch (error) {
+      console.warn("failed to encode media as data url", error);
+      throw new Error("音声/動画を読み込めませんでした。もう一度お試しください。");
+    }
+
+    return payload;
   }
 
   return {

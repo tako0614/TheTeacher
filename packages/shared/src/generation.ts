@@ -6,7 +6,6 @@ import {
   isoDateTimeString,
   materialSchema,
 } from "./domain";
-import { ingestJobSchema } from "./materials";
 
 export const generateFromMaterialRequestSchema = z.object({
   learningId: z.string().uuid(),

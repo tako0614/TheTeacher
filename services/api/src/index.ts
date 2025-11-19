@@ -19,6 +19,7 @@ import {
   ingestRequestSchema,
 } from "@theteacher/shared";
 import { Hono } from "hono";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { z } from "zod";
 
 import {
@@ -201,13 +202,18 @@ const updatePresetSchema = upsertPresetSchema
     message: "at least one field is required",
   });
 
-type AppBindings = {
+interface AppBindings {
   DB: D1Database;
-};
+  OPENAI_API_KEY?: string;
+  OPENAI_API_BASE_URL?: string;
+  OPENAI_MODEL?: string;
+  OPENAI_TRANSCRIPTION_MODEL?: string;
+  OPENAI_VISION_MODEL?: string;
+}
 
-type AppEnv = {
+interface AppEnv {
   Bindings: AppBindings;
-};
+}
 
 export const app = new Hono<AppEnv>();
 
@@ -570,6 +576,8 @@ const saveGeneratedContent = async (
 const summarizeText = (text: string, limit = 280) =>
   text.replace(/\s+/g, " ").trim().slice(0, limit);
 
+const countTokens = (text: string) => text.split(/\s+/).filter(Boolean).length;
+
 const stripHtml = (value: string) =>
   value
     .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, " ")
@@ -591,10 +599,159 @@ const fetchRemoteText = async (url: string): Promise<string> => {
   return raw.slice(0, 16_000);
 };
 
+const defaultOpenAiBaseUrl = "https://api.openai.com/v1";
+
+type DataUrlPayload = {
+  mimeType: string;
+  bytes: Uint8Array;
+  size: number;
+};
+
+const decodeBase64 = (value: string) => {
+  if (typeof atob === "function") return atob(value);
+  const globalBuffer = (globalThis as {
+    Buffer?: { from(input: string, encoding: string): { toString(encoding: string): string } };
+  }).Buffer;
+  if (globalBuffer) {
+    return globalBuffer.from(value, "base64").toString("binary");
+  }
+  throw new Error("base64 decoding is not supported in this environment");
+};
+
+const decodeDataUrl = (dataUrl: string): DataUrlPayload => {
+  const match = dataUrl.match(/^data:(.+?);base64,(.+)$/i);
+  if (!match) {
+    throw new Error("invalid data url payload");
+  }
+  const [, mimeType, base64Content] = match;
+  const normalized = base64Content.replace(/\s/g, "");
+  const binary = decodeBase64(normalized);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return {
+    mimeType: mimeType || "application/octet-stream",
+    bytes,
+    size: bytes.byteLength,
+  };
+};
+
+const resolveOpenAiBaseUrl = (env?: AppBindings) =>
+  (env?.OPENAI_API_BASE_URL?.trim() || defaultOpenAiBaseUrl).replace(/\/$/, "");
+
+const joinChatContent = (content: unknown): string => {
+  if (!content) return "";
+  if (typeof content === "string") return content.trim();
+  if (Array.isArray(content)) {
+    return content
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (item && typeof item === "object" && "text" in item && typeof item.text === "string") {
+          return item.text;
+        }
+        return "";
+      })
+      .join(" ")
+      .trim();
+  }
+  return "";
+};
+
+const transcribeWithOpenAi = async (
+  env: AppBindings | undefined,
+  data: DataUrlPayload,
+  details?: { fileName?: string },
+) => {
+  const apiKey = env?.OPENAI_API_KEY;
+  if (!apiKey) {
+    throw new Error("OPENAI_API_KEY is not configured for transcription");
+  }
+  const model = env?.OPENAI_TRANSCRIPTION_MODEL?.trim() || "whisper-1";
+  const form = new FormData();
+  form.append(
+    "file",
+    new File([data.bytes], details?.fileName || `material-${Date.now()}`, { type: data.mimeType }),
+  );
+  form.append("model", model);
+  form.append("response_format", "json");
+  form.append("temperature", "0");
+  form.append("language", "ja");
+  const response = await fetch(`${resolveOpenAiBaseUrl(env)}/audio/transcriptions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: form,
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => response.statusText);
+    throw new Error(`OpenAI transcription failed (${response.status}): ${detail}`);
+  }
+  const json = (await response.json()) as { text?: string };
+  const text = json.text?.trim() ?? "";
+  if (!text) {
+    throw new Error("OpenAI transcription response did not contain text");
+  }
+  return { text, model };
+};
+
+const visionOcrWithOpenAi = async (env: AppBindings | undefined, dataUrl: string) => {
+  const apiKey = env?.OPENAI_API_KEY;
+  if (!apiKey) {
+    throw new Error("OPENAI_API_KEY is not configured for OCR");
+  }
+  const model = env?.OPENAI_VISION_MODEL?.trim() || env?.OPENAI_MODEL?.trim() || "gpt-4o-mini";
+  const response = await fetch(`${resolveOpenAiBaseUrl(env)}/chat/completions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model,
+      temperature: 0,
+      messages: [
+        {
+          role: "system",
+          content: "You are an OCR assistant. Extract readable text verbatim and reply with plain text.",
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: "Extract the text from this image. Return only the text content with preserved newlines where appropriate.",
+            },
+            {
+              type: "image_url",
+              image_url: {
+                url: dataUrl,
+                detail: "high",
+              },
+            },
+          ],
+        },
+      ],
+    }),
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => response.statusText);
+    throw new Error(`OpenAI vision request failed (${response.status}): ${detail}`);
+  }
+  const json = await response.json();
+  const content = joinChatContent(json.choices?.[0]?.message?.content);
+  if (!content) {
+    throw new Error("OpenAI vision response did not contain any text");
+  }
+  return { text: content, model };
+};
+
 const extractMaterialFromSource = async (
   source: IngestSource,
   preferOffline = false,
   payload?: MaterialIngestRequest["payload"],
+  env?: AppBindings,
 ) => {
   const payloadText = payload?.text?.trim();
   if (payloadText) {
@@ -603,7 +760,7 @@ const extractMaterialFromSource = async (
       rawContent: payloadText,
       extracted: {
         preview,
-        tokens: payloadText.split(/\s+/).filter(Boolean).length,
+        tokens: countTokens(payloadText),
         format:
           source.kind === "image"
             ? ("ocr" as const)
@@ -613,12 +770,60 @@ const extractMaterialFromSource = async (
       },
       metadata: {
         sourceLabel: source.kind,
-        payloadFileName: payload.fileName,
-        payloadBytes: payload.bytes,
-        payloadMimeType: payload.mimeType,
-        payloadDataUrlPreview: payload.dataUrl?.slice(0, 120),
+        payloadFileName: payload?.fileName,
+        payloadBytes: payload?.bytes,
+        payloadMimeType: payload?.mimeType,
+        payloadDataUrlPreview: payload?.dataUrl?.slice(0, 120),
       },
     };
+  }
+
+  if (payload?.dataUrl) {
+    const payloadData = payload!;
+    if (source.kind === "audio" || source.kind === "video") {
+      const decoded = decodeDataUrl(payloadData.dataUrl);
+      const { text, model } = await transcribeWithOpenAi(env, decoded, {
+        fileName: payloadData.fileName,
+      });
+      const preview = summarizeText(text);
+      return {
+        rawContent: text,
+        extracted: {
+          preview,
+          tokens: countTokens(text),
+          format: "transcript" as const,
+        },
+        metadata: {
+          sourceLabel: `${source.kind}_transcribed`,
+          payloadFileName: payloadData.fileName,
+          payloadBytes: payloadData.bytes ?? decoded.size,
+          payloadMimeType: payloadData.mimeType ?? decoded.mimeType,
+          openAiModel: model,
+          payloadDataUrlPreview: payloadData.dataUrl.slice(0, 120),
+        },
+      };
+    }
+
+    if (source.kind === "image") {
+      const { text, model } = await visionOcrWithOpenAi(env, payloadData.dataUrl);
+      const preview = summarizeText(text);
+      return {
+        rawContent: text,
+        extracted: {
+          preview,
+          tokens: countTokens(text),
+          format: "ocr" as const,
+        },
+        metadata: {
+          sourceLabel: "image_ocr",
+          payloadFileName: payloadData.fileName,
+          payloadBytes: payloadData.bytes,
+          payloadMimeType: payloadData.mimeType,
+          openAiModel: model,
+          payloadDataUrlPreview: payloadData.dataUrl.slice(0, 120),
+        },
+      };
+    }
   }
 
   if (source.kind === "text") {
@@ -691,7 +896,7 @@ const extractMaterialFromSource = async (
     rawContent,
     extracted: {
       preview,
-      tokens: rawContent.split(/\s+/).filter(Boolean).length,
+      tokens: countTokens(rawContent),
       format: isAudio ? ("transcript" as const) : isOcr ? ("ocr" as const) : ("plain" as const),
     },
     metadata: { sourceLabel: source.kind, preferOffline },
@@ -771,7 +976,7 @@ const buildLibraryEntryRecord = (
 const splitIdeas = (text: string, limit = 3) => {
   const normalized = text.replace(/\s+/g, " ").trim();
   const sentences = normalized
-    .split(/(?<=[。\.!?])\s+/)
+    .split(/(?<=[。.!?])\s+/)
     .map((line) => line.trim())
     .filter(Boolean);
   if (sentences.length >= limit) return sentences.slice(0, limit);
@@ -787,11 +992,11 @@ const splitIdeas = (text: string, limit = 3) => {
   return (sentences.length ? sentences : [joined]).slice(0, limit);
 };
 
-type PresetContext = {
+interface PresetContext {
   title?: string;
   systemPrompt?: string;
   userTemplate?: string;
-};
+}
 
 const buildGenerationJob = (
   types: GenerateFromMaterialRequest["types"],
@@ -874,7 +1079,7 @@ const craftGeneratedContents = (
   request: GenerateFromMaterialRequest,
   material: Material | null,
   preset?: PresetContext,
-): Array<Omit<GeneratedContent, "id" | "createdAt">> => {
+): Omit<GeneratedContent, "id" | "createdAt">[] => {
   const baseText =
     material?.rawContent?.trim() ||
     material?.sourcePath ||
@@ -1076,11 +1281,33 @@ app.post("/api/materials/ingest", async (c) => {
   const learning = await fetchLearning(c.env.DB, request.learningId);
   if (!learning) return c.json({ error: "learning_not_found" }, 404);
 
-  const { rawContent, extracted, metadata: ingestMetadata } = await extractMaterialFromSource(
-    request.source,
-    request.preferOffline ?? false,
-    request.payload,
-  );
+  let extractedResult:
+    | Awaited<ReturnType<typeof extractMaterialFromSource>>
+    | undefined;
+  try {
+    extractedResult = await extractMaterialFromSource(
+      request.source,
+      request.preferOffline ?? false,
+      request.payload,
+      c.env,
+    );
+  } catch (error) {
+    console.error("material ingest failed", error);
+    return c.json(
+      {
+        error: "material_ingest_failed",
+        message: error instanceof Error ? error.message : "素材の解析に失敗しました。",
+      },
+      500,
+    );
+  }
+  if (!extractedResult) {
+    return c.json(
+      { error: "material_ingest_failed", message: "素材の解析に失敗しました。" },
+      500,
+    );
+  }
+  const { rawContent, extracted, metadata: ingestMetadata } = extractedResult;
   const id = crypto.randomUUID();
   const libraryEntryId = crypto.randomUUID();
   const createdAt = nowIso();
@@ -1236,6 +1463,19 @@ app.put("/api/materials/:id", async (c) => {
 
   const material = await fetchMaterial(c.env.DB, id);
   return c.json(material);
+});
+
+app.delete("/api/materials/:id", async (c) => {
+  const id = c.req.param("id");
+  const material = await fetchMaterial(c.env.DB, id);
+  if (!material) {
+    return c.json({ error: "not_found" }, 404);
+  }
+  await c.env.DB.prepare("DELETE FROM Material WHERE id = ?").bind(id).run();
+  await c.env.DB.prepare("DELETE FROM GeneratedContent WHERE materialId = ?").bind(id).run();
+  await ensureMaterialTables(c.env.DB);
+  await c.env.DB.prepare("DELETE FROM MaterialLibraryEntry WHERE materialId = ?").bind(id).run();
+  return c.json({ ok: true });
 });
 
 app.get("/api/learnings/:id/contents", async (c) => {
@@ -1496,11 +1736,11 @@ const flattenContent = (content: unknown): string => {
   return String(content);
 };
 
-const fallbackSemanticNodes = (): Array<SemanticNodeWithMeta & { embedding: number[] }> =>
+const fallbackSemanticNodes = (): (SemanticNodeWithMeta & { embedding: number[] })[] =>
   [
     {
       id: "fallback-learning",
-      refType: "learning",
+      refType: "learning" as const,
       refId: "fallback-learning",
       embedding: toEmbedding("高校数学 二次関数 基礎練習"),
       metadata: { tags: ["math"] },
@@ -1510,9 +1750,11 @@ const fallbackSemanticNodes = (): Array<SemanticNodeWithMeta & { embedding: numb
     },
   ].map((node) => ({ ...node, embedding: node.embedding.slice() }));
 
-const fallbackLearnings: Array<
-  Learning & { materialsCount: number; generatedCount: number; sessionCount: number }
-> = [
+const fallbackLearnings: (Learning & {
+  materialsCount: number;
+  generatedCount: number;
+  sessionCount: number;
+})[] = [
   {
     id: "fallback-learning",
     title: "高校数学I_二次関数_第1回",
@@ -1545,7 +1787,7 @@ const normalizeTagsInput = (value: unknown): string[] | undefined => {
 
 const buildSemanticIndex = async (
   db?: D1Database,
-): Promise<Array<SemanticNodeWithMeta & { embedding: number[] }>> => {
+): Promise<(SemanticNodeWithMeta & { embedding: number[] })[]> => {
   if (!db) return fallbackSemanticNodes();
   const learningRows = await db
     .prepare("SELECT * FROM Learning ORDER BY updatedAt DESC LIMIT 200")
@@ -1568,7 +1810,7 @@ const buildSemanticIndex = async (
     .prepare("SELECT * FROM GeneratedContent ORDER BY createdAt DESC LIMIT 200")
     .all<GeneratedContentRow>();
 
-  const nodes: Array<SemanticNodeWithMeta & { embedding: number[] }> = [];
+  const nodes: (SemanticNodeWithMeta & { embedding: number[] })[] = [];
 
   for (const learning of learnings) {
     const basis = `${learning.title} ${learning.subject ?? ""} ${(learning.tags ?? []).join(" ")}`;
@@ -1794,7 +2036,7 @@ app.post("/ai/tools", async (c) => {
     return c.json({ tool: parsed.data.tool, result });
   } catch (error) {
     if (error instanceof ToolCallError) {
-      return c.json({ error: error.code, message: error.message }, error.status);
+      return c.json({ error: error.code, message: error.message }, error.status as ContentfulStatusCode);
     }
     console.error("tool call failed", error);
     return c.json(

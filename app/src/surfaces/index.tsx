@@ -1,7 +1,9 @@
 import { A, useNavigate, useSearchParams } from "@solidjs/router";
 import {
   For,
+  Match,
   Show,
+  Switch,
   createEffect,
   createMemo,
   createResource,
@@ -13,8 +15,10 @@ import {
   type GeneratedContentType,
   type IngestJob,
   type GeneratedContent,
+  type Material,
   type MaterialIngestRequest,
   type MaterialLibraryConfig,
+  type MaterialLibraryEntry,
   type MaterialType,
   type Preset,
 } from "@theteacher/shared";
@@ -23,6 +27,8 @@ import {
   materialIngestPresets,
   resolveLibraryConfig,
 } from "../lib/materials";
+import RichContentRenderer from "../components/rich-content/RichContentRenderer";
+import { getRichContentPreview } from "../lib/rich-content";
 
 import {
   type SemanticMatch,
@@ -36,12 +42,14 @@ import {
   createContent,
   createLearning,
   createMaterial,
+  deleteMaterial,
   generateFromMaterial,
   ingestMaterial,
   createSession,
   fetchContents,
   fetchLearnings,
   fetchLearning,
+  fetchMaterialLibrary,
   fetchMaterials,
   fetchPresets,
   fetchSessions,
@@ -54,6 +62,7 @@ import {
 } from "../lib/api-client";
 import { buildBackupSnapshot, downloadSnapshot, parseSnapshotFile } from "../lib/backup";
 import { selectPresetOptions, useSettings } from "../lib/settings-store";
+import { useNewLearningDraft } from "../lib/new-learning-draft-store";
 import { processMaterialFile } from "../lib/file-processing";
 
 const subjects = [
@@ -448,11 +457,8 @@ const LearningDetailSurface: Component = () => {
     }
   });
 
-  const previewContent = (content: Record<string, unknown>) => {
-    if (typeof content.title === "string") return content.title;
-    if (typeof content.preview === "string") return content.preview;
-    return JSON.stringify(content).slice(0, 80);
-  };
+  const previewContent = (content: Record<string, unknown>) =>
+    getRichContentPreview(content);
 
   const materialSource = () => {
     if (materialType() === "text") return "テキスト入力";
@@ -554,15 +560,19 @@ const LearningDetailSurface: Component = () => {
         bytes: processed.bytes,
         mimeType: processed.mimeType,
       });
+      const currentType = materialType();
       if (processed.text) {
         setMaterialText(processed.text.slice(0, 4000));
+        setSaveMessage(
+          `${currentType.toUpperCase()} から ${processed.text.length} 文字を抽出しました。`,
+        );
       } else {
         setMaterialText("");
-      }
-      if (processed.text) {
-        setSaveMessage(
-          `${materialType().toUpperCase()} から ${processed.text.length} 文字を抽出しました。`,
-        );
+        if (currentType === "audio" || currentType === "video") {
+          setSaveMessage(
+            `${file.name} をアップロードしました。OpenAIで${currentType === "audio" ? "文字起こし" : "音声抽出/文字起こし"}を実行します。`,
+          );
+        }
       }
     } catch (error) {
       console.error(error);
@@ -775,13 +785,9 @@ const LearningDetailSurface: Component = () => {
                             item.content as Record<string, unknown>,
                           )}
                         </h3>
-                        <p class="mt-1 text-sm text-slate-700">
-                          {typeof (item.content as Record<string, unknown>)
-                            .preview === "string"
-                            ? ((item.content as Record<string, unknown>)
-                                .preview as string)
-                            : "要約・問題などの本文は生成API接続後に差し替え予定"}
-                        </p>
+                        <div class="mt-2 text-sm">
+                          <RichContentRenderer value={item.content} />
+                        </div>
                       </div>
                       <div class="text-right">
                         <p class="text-xs text-slate-500">
@@ -1423,6 +1429,16 @@ const ChatSurface: Component = () => {
   const [toolNewLearningTitle, setToolNewLearningTitle] = createSignal("");
   const [toolNewLearningSubject, setToolNewLearningSubject] = createSignal("");
   const [isToolRunning, setIsToolRunning] = createSignal(false);
+  const navigate = useNavigate();
+  const newLearningDraft = useNewLearningDraft();
+
+  const activeDraft = () => newLearningDraft.state.draft;
+  const learningCandidate = () =>
+    semanticHits().find((hit) => hit.refType === "learning");
+  const materialCandidateCount = () =>
+    semanticHits().filter((hit) => hit.refType === "material").length;
+  const contentCandidateCount = () =>
+    semanticHits().filter((hit) => hit.refType === "generated_content").length;
 
   const appendMessage = (role: ChatMessage["role"], content: string) =>
     setMessages((prev) => [...prev, { role, content }]);
@@ -1480,6 +1496,27 @@ const ChatSurface: Component = () => {
     } finally {
       setIsToolRunning(false);
     }
+  };
+
+  const handleSendToNewLearning = () => {
+    const hits = semanticHits();
+    if (hits.length === 0) {
+      setError("意味検索結果がないため学習候補を作成できません。");
+      return;
+    }
+    const titleInput = toolNewLearningTitle().trim();
+    const subjectInput = toolNewLearningSubject().trim();
+    const seeded = newLearningDraft.seedDraftFromMatches(hits, {
+      title: titleInput || undefined,
+      subject: subjectInput || undefined,
+      tags: subjectInput ? [subjectInput] : undefined,
+    });
+    if (!seeded) {
+      setError("Learningに紐づくヒットが見つからず、抽出ドラフトを作成できませんでした。");
+      return;
+    }
+    setError(null);
+    navigate("/new-learning");
   };
 
   const handleSend = async () => {
@@ -1643,6 +1680,64 @@ const ChatSurface: Component = () => {
               </ul>
             </Show>
           </div>
+          <div class="space-y-2 rounded-lg border border-indigo-200 bg-indigo-50 p-3">
+            <p class="text-xs font-semibold uppercase text-indigo-700">
+              AI抽出ドラフト
+            </p>
+            <Show when={activeDraft()}>
+              {(draftAccessor) => (
+                <div class="space-y-1 rounded-md border border-indigo-200 bg-white/70 px-3 py-2 text-sm text-indigo-900">
+                  <p class="font-semibold">{draftAccessor().title}</p>
+                  <p class="text-xs text-indigo-700">
+                    推薦: 教材 {draftAccessor().recommendedMaterialIds.length} 件 / 生成 {draftAccessor().recommendedContentIds.length} 件
+                  </p>
+                  <div class="flex flex-wrap gap-2 pt-1">
+                    <button
+                      class="rounded-md border border-indigo-200 px-2 py-1 text-xs font-semibold text-indigo-700 hover:bg-white"
+                      onClick={() => navigate("/new-learning")}
+                    >
+                      /new-learning を開く
+                    </button>
+                    <button
+                      class="rounded-md border border-transparent px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-white/60"
+                      onClick={() => newLearningDraft.clearDraft()}
+                    >
+                      ドラフトを破棄
+                    </button>
+                  </div>
+                </div>
+              )}
+            </Show>
+            <div class="rounded-md border border-indigo-200 bg-white/70 px-3 py-2 text-sm text-indigo-900">
+              <Show
+                when={learningCandidate()}
+                fallback={
+                  <p class="text-xs text-indigo-700">
+                    意味検索が完了すると、ここから抽出候補を新しい学習作成フローに送れます。
+                  </p>
+                }
+              >
+                {(candidate) => (
+                  <>
+                    <p class="font-semibold">{candidate().label}</p>
+                    <p class="text-xs text-indigo-700">
+                      教材 {materialCandidateCount()} 件 / 生成物 {contentCandidateCount()} 件を再利用候補として抽出済みです。
+                    </p>
+                    <p class="text-xs text-indigo-700">
+                      上のタイトル・科目入力値を優先し、「過去教材から新しい学習作成」画面へ送ります。
+                    </p>
+                    <button
+                      class="mt-2 w-full rounded-md bg-indigo-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
+                      onClick={handleSendToNewLearning}
+                      disabled={!learningCandidate()}
+                    >
+                      過去教材から新規Learningを組み立てる
+                    </button>
+                  </>
+                )}
+              </Show>
+            </div>
+          </div>
         </aside>
 
         <div class="space-y-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
@@ -1738,173 +1833,922 @@ const ChatSurface: Component = () => {
   );
 };
 
-const files = [
-  {
-    id: "f1",
-    name: "math_quadratic.pdf",
-    type: "pdf",
-    size: "2.1MB",
-    notes: "12ページ、式が多い教材",
-  },
-  {
-    id: "f2",
-    name: "graph.png",
-    type: "image",
-    size: "420KB",
-    notes: "グラフの例題付き",
-  },
-  {
-    id: "f3",
-    name: "lecture_audio.m4a",
-    type: "audio",
-    size: "6.3MB",
-    notes: "10分の講義録音（文字起こし済み）",
-  },
+
+const materialTypeLabels: Record<MaterialType, string> = {
+  text: "テキスト",
+  pdf: "PDF",
+  image: "画像",
+  audio: "音声",
+  video: "動画",
+  url: "URL",
+};
+
+const materialFilterOptions: Array<{ id: "all" | MaterialType; label: string }> = [
+  { id: "all", label: "すべて" },
+  { id: "pdf", label: materialTypeLabels.pdf },
+  { id: "image", label: materialTypeLabels.image },
+  { id: "audio", label: materialTypeLabels.audio },
+  { id: "video", label: materialTypeLabels.video },
+  { id: "text", label: materialTypeLabels.text },
+  { id: "url", label: materialTypeLabels.url },
 ];
 
-const MaterialSettingsSurface: Component = () => (
-  <section class="space-y-6">
-    <header class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-      <div>
-        <p class="text-xs font-semibold uppercase tracking-wide text-indigo-600">
-          教材設定
-        </p>
-        <h1 class="text-2xl font-bold text-slate-900">
-          教材ファイルと生成設定をまとめて調整
-        </h1>
-        <p class="text-sm text-slate-600">
-          左側でファイルを管理し、右側で生成パラメータやプリセットを変更します。
-        </p>
-      </div>
-      <div class="flex flex-wrap gap-2">
-        <button class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">
-          ファイルを追加
-        </button>
-        <button class="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500">
-          再解析を実行
-        </button>
-      </div>
-    </header>
+const generationTargetOrder: GeneratedContentType[] = [
+  "qa",
+  "practice",
+  "summary",
+  "podcast_script",
+];
 
-    <div class="grid gap-4 md:grid-cols-[1fr_1.1fr]">
-      <div class="space-y-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-        <p class="text-xs font-semibold uppercase text-slate-500">教材ファイル</p>
-        <div class="space-y-2">
-          <For each={files}>
-            {(file) => (
-              <div class="flex items-start justify-between rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                <div>
-                  <p class="text-sm font-semibold text-slate-900">{file.name}</p>
-                  <p class="text-xs text-slate-600">
-                    種別: {file.type} / サイズ: {file.size}
-                  </p>
-                  <p class="text-xs text-slate-600">メモ: {file.notes}</p>
-                </div>
-                <div class="flex gap-2">
-                  <button class="rounded-md border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-white">
-                    プレビュー
-                  </button>
-                  <button class="rounded-md border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-white">
-                    置き換え
-                  </button>
-                </div>
-              </div>
-            )}
-          </For>
+const difficultyOptions = [
+  { id: "basic", label: "基礎" },
+  { id: "standard", label: "標準" },
+  { id: "advanced", label: "発展" },
+];
+
+const isRemoteUrl = (value?: string) =>
+  typeof value === "string" && /^(?:https?:\/\/|data:)/.test(value);
+
+const accessiblePreviewUrl = (...sources: Array<string | undefined>) =>
+  sources.find((value) => isRemoteUrl(value));
+
+const detectMaterialType = (file: File): MaterialType => {
+  const name = file.name.toLowerCase();
+  if (file.type === "application/pdf" || name.endsWith(".pdf")) return "pdf";
+  if (file.type.startsWith("image/")) return "image";
+  if (file.type.startsWith("audio/")) return "audio";
+  if (file.type.startsWith("video/")) return "video";
+  return "text";
+};
+
+const formatFileSize = (value?: number) => {
+  if (!value) return "サイズ不明";
+  if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${value} B`;
+};
+
+const isTauriRuntime = () =>
+  typeof (globalThis as { __TAURI_IPC__?: unknown }).__TAURI_IPC__ !== "undefined" ||
+  typeof (globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ !== "undefined";
+
+const joinLocalPath = (base?: string, child?: string) => {
+  if (!base || !child) return undefined;
+  if (/^(?:[a-zA-Z]:|\\\\|\/)/.test(child)) return child;
+  return `${base.replace(/[\\/]+$/, "")}/${child.replace(/^[\\/]+/, "")}`;
+};
+
+const resolveLocalEntryPath = (
+  entry?: MaterialLibraryEntry,
+  config?: MaterialLibraryConfig,
+) => {
+  if (!entry) return undefined;
+  const candidates = [
+    entry.libraryPath,
+    entry.storedPath,
+    joinLocalPath(config?.rootDir, entry.libraryPath),
+    joinLocalPath(config?.rootDir, entry.storedPath),
+  ];
+  return candidates.find((value) => value && !isRemoteUrl(value));
+};
+
+const convertLocalPathToUrl = async (path: string) => {
+  if (!isTauriRuntime()) return undefined;
+  try {
+    const { convertFileSrc } = await import("@tauri-apps/api/core");
+    return convertFileSrc(path);
+  } catch (error) {
+    console.warn("Failed to convertFileSrc", error);
+    return undefined;
+  }
+};
+
+const openLocalPath = async (path: string) => {
+  if (!isTauriRuntime()) {
+    if (typeof window !== "undefined") {
+      window.open(path, "_blank", "noopener");
+    }
+    return;
+  }
+  const { open } = await import("@tauri-apps/api/shell");
+  await open(path);
+};
+
+const materialDisplayName = (material: Material, entry?: MaterialLibraryEntry) => {
+  const metadataName = material.metadata?.name as string | undefined;
+  const payloadName = material.metadata?.payloadFileName as string | undefined;
+  return (
+    entry?.displayName ??
+    metadataName ??
+    payloadName ??
+    material.sourcePath ??
+    `${material.type.toUpperCase()}_${material.id.slice(0, 8)}`
+  );
+};
+
+const summarizeMaterialText = (text?: string, limit = 800) =>
+  text ? text.replace(/\s+/g, " ").trim().slice(0, limit) : "抽出テキストがまだありません。";
+
+const MaterialSettingsSurface: Component = () => {
+  const settings = useSettings();
+  const [selectedLearningId, setSelectedLearningId] = createSignal<string | undefined>();
+  const [selectedMaterialId, setSelectedMaterialId] = createSignal<string | undefined>();
+  const [fileTypeFilter, setFileTypeFilter] = createSignal<MaterialType | "all">("all");
+  const [generationTargets, setGenerationTargets] = createSignal<GeneratedContentType[]>([
+    "qa",
+    "practice",
+  ]);
+  const [difficulty, setDifficulty] = createSignal(difficultyOptions[1].id);
+  const [questionCount, setQuestionCount] = createSignal(5);
+  const [temperature, setTemperature] = createSignal(0.3);
+  const [presetId, setPresetId] = createSignal<string>();
+  const [toast, setToast] = createSignal<{ tone: "success" | "error" | "info"; message: string } | null>(
+    null,
+  );
+  const [isUploading, setIsUploading] = createSignal(false);
+  const [isGenerating, setIsGenerating] = createSignal(false);
+  const [libraryConfig, setLibraryConfig] = createSignal<MaterialLibraryConfig>();
+  const [localPreviewUrl, setLocalPreviewUrl] = createSignal<string | undefined>();
+  const [isLoadingLocalPreview, setIsLoadingLocalPreview] = createSignal(false);
+  const [previewError, setPreviewError] = createSignal<string | null>(null);
+  const [pendingDeleteId, setPendingDeleteId] = createSignal<string | null>(null);
+  const [pendingOpenId, setPendingOpenId] = createSignal<string | null>(null);
+  let fileInputRef: HTMLInputElement | undefined;
+
+  onMount(async () => {
+    setLibraryConfig(await resolveLibraryConfig());
+  });
+
+  const [learnings] = createResource(() => true, () => fetchLearnings({ limit: 50 }));
+  createEffect(() => {
+    const list = learnings();
+    if (!selectedLearningId() && list?.length) {
+      setSelectedLearningId(list[0].id);
+    }
+  });
+
+  const [materials, { refetch: refetchMaterials }] = createResource(
+    () => selectedLearningId(),
+    (id) => (id ? fetchMaterials(id).then((res) => res.items) : []),
+  );
+  const [libraryEntries, { refetch: refetchLibrary }] = createResource(
+    () => selectedLearningId(),
+    (id) => (id ? fetchMaterialLibrary({ learningId: id, limit: 100 }) : []),
+  );
+
+  const libraryEntryMap = createMemo(() => {
+    const map = new Map<string, MaterialLibraryEntry>();
+    (libraryEntries() ?? []).forEach((entry) => {
+      if (entry.materialId) {
+        map.set(entry.materialId, entry);
+      }
+    });
+    return map;
+  });
+
+  const selectedLearning = createMemo(() =>
+    (learnings() ?? []).find((item) => item.id === selectedLearningId()),
+  );
+  const selectedMaterial = createMemo(() =>
+    (materials() ?? []).find((item) => item.id === selectedMaterialId()),
+  );
+  const selectedLibraryEntry = createMemo(() => {
+    const id = selectedMaterialId();
+    if (!id) return undefined;
+    return libraryEntryMap().get(id);
+  });
+  const filteredMaterials = createMemo(() => {
+    const list = materials() ?? [];
+    const filter = fileTypeFilter();
+    return filter === "all" ? list : list.filter((item) => item.type === filter);
+  });
+  const remotePreviewUrl = createMemo(() => {
+    const material = selectedMaterial();
+    const entry = selectedLibraryEntry();
+    const metadataUrl = material?.metadata?.previewUrl as string | undefined;
+    const payloadPreview = material?.metadata?.payloadDataUrlPreview as string | undefined;
+    return accessiblePreviewUrl(
+      metadataUrl,
+      payloadPreview,
+      entry?.storedPath,
+      entry?.libraryPath,
+      material?.sourcePath,
+    );
+  });
+  const previewUrl = createMemo(() => remotePreviewUrl() ?? localPreviewUrl());
+  const selectedMetadataEntries = createMemo(() => {
+    const metadata = selectedMaterial()?.metadata ?? {};
+    return Object.entries(metadata).slice(0, 6);
+  });
+  const presetOptions = createMemo(() => selectPresetOptions(settings.state.presets));
+  createEffect(() => {
+    if (!presetId() && presetOptions().length) {
+      setPresetId(presetOptions()[0].value);
+    }
+  });
+  createEffect(() => {
+    const list = materials() ?? [];
+    if (!list.length) {
+      setSelectedMaterialId(undefined);
+      return;
+    }
+    if (!selectedMaterialId() || !list.some((item) => item.id === selectedMaterialId())) {
+      setSelectedMaterialId(list[0].id);
+    }
+  });
+
+  createEffect(() => {
+    const remote = remotePreviewUrl();
+    if (remote) {
+      setLocalPreviewUrl(undefined);
+      setPreviewError(null);
+      return;
+    }
+    const entry = selectedLibraryEntry();
+    if (!entry) {
+      setLocalPreviewUrl(undefined);
+      setPreviewError(null);
+      return;
+    }
+    if (!isTauriRuntime()) {
+      setPreviewError("ローカルプレビューはTauriアプリでのみ利用できます。");
+      setLocalPreviewUrl(undefined);
+      return;
+    }
+    const path = resolveLocalEntryPath(entry, libraryConfig());
+    if (!path) {
+      setPreviewError("プレビュー可能なローカルパスがありません。");
+      setLocalPreviewUrl(undefined);
+      return;
+    }
+    let cancelled = false;
+    setIsLoadingLocalPreview(true);
+    convertLocalPathToUrl(path)
+      .then((url) => {
+        if (cancelled) return;
+        if (url) {
+          setLocalPreviewUrl(url);
+          setPreviewError(null);
+        } else {
+          setLocalPreviewUrl(undefined);
+          setPreviewError("ローカルファイルのURL変換に失敗しました。");
+        }
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setLocalPreviewUrl(undefined);
+        setPreviewError("ローカルファイルのURL変換に失敗しました。");
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsLoadingLocalPreview(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  });
+
+  const toggleTarget = (type: GeneratedContentType) => {
+    setGenerationTargets((current) =>
+      current.includes(type)
+        ? current.filter((value) => value !== type)
+        : [...current, type],
+    );
+  };
+
+  const handleFileUpload = async (event: Event & { currentTarget: HTMLInputElement }) => {
+    const input = event.currentTarget;
+    const file = input.files?.item(0);
+    input.value = "";
+    if (!file || !selectedLearningId()) return;
+    setIsUploading(true);
+    setToast(null);
+    try {
+      const type = detectMaterialType(file);
+      const processed = await processMaterialFile(file, type);
+      const payload: MaterialIngestRequest["payload"] = {
+        text: processed.text,
+        dataUrl: processed.dataUrl,
+        fileName: processed.fileName,
+        bytes: processed.bytes,
+        mimeType: processed.mimeType,
+      };
+      const source: MaterialIngestRequest["source"] =
+        type === "text"
+          ? { kind: "text", text: processed.text ?? file.name }
+          : { kind: type as Exclude<MaterialType, "text" | "url">, path: processed.fileName };
+      const result = await ingestMaterial({
+        learningId: selectedLearningId()!,
+        source,
+        preferOffline: true,
+        payload,
+      });
+      await Promise.all([refetchMaterials(), refetchLibrary()]);
+      setSelectedMaterialId(result.material.id);
+      setToast({
+        tone: "success",
+        message: `${materialTypeLabels[result.material.type]} を取り込みました。`,
+      });
+    } catch (error) {
+      console.error(error);
+      setToast({
+        tone: "error",
+        message:
+          error instanceof Error
+            ? `ファイルの追加に失敗しました: ${error.message}`
+            : "ファイルの追加に失敗しました。",
+      });
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  const openRemoteUrl = (url: string | undefined) => {
+    if (!url) return;
+    if (typeof window !== "undefined") {
+      window.open(url, "_blank", "noopener");
+    }
+  };
+
+  const handleOpenMaterialSource = async (materialId: string) => {
+    const material = (materials() ?? []).find((item) => item.id === materialId);
+    const entry = libraryEntryMap().get(materialId);
+    const remote = accessiblePreviewUrl(
+      (material?.metadata?.previewUrl as string | undefined) ?? undefined,
+      material?.sourcePath,
+      entry?.storedPath,
+      entry?.libraryPath,
+    );
+    if (remote) {
+      openRemoteUrl(remote);
+      return;
+    }
+    const path = resolveLocalEntryPath(entry, libraryConfig());
+    if (!path) {
+      setToast({ tone: "error", message: "開くためのローカルパスが見つかりませんでした。" });
+      return;
+    }
+    setPendingOpenId(materialId);
+    try {
+      await openLocalPath(path);
+      setToast({ tone: "info", message: "ローカルファイルを開きました。" });
+    } catch (error) {
+      setToast({
+        tone: "error",
+        message:
+          error instanceof Error ? `ファイルを開けませんでした: ${error.message}` : "ファイルを開けませんでした。",
+      });
+    } finally {
+      setPendingOpenId(null);
+    }
+  };
+
+  const handleDeleteMaterial = async (materialId: string) => {
+    const material = (materials() ?? []).find((item) => item.id === materialId);
+    if (!material) return;
+    if (typeof window !== "undefined" && !window.confirm("この教材ファイルを削除しますか？")) {
+      return;
+    }
+    setPendingDeleteId(materialId);
+    setToast(null);
+    try {
+      await deleteMaterial(materialId);
+      if (selectedMaterialId() === materialId) {
+        setSelectedMaterialId(undefined);
+      }
+      await Promise.all([refetchMaterials(), refetchLibrary()]);
+      setToast({
+        tone: "info",
+        message: `${materialDisplayName(material, libraryEntryMap().get(materialId))} を削除しました。`,
+      });
+    } catch (error) {
+      setToast({
+        tone: "error",
+        message:
+          error instanceof Error ? `削除に失敗しました: ${error.message}` : "削除に失敗しました。",
+      });
+    } finally {
+      setPendingDeleteId(null);
+    }
+  };
+
+  const openFilePicker = () => {
+    if (!selectedLearningId()) {
+      setToast({ tone: "error", message: "学習カードを先に選択してください。" });
+      return;
+    }
+    fileInputRef?.click();
+  };
+
+  const handleSaveDraft = () => {
+    const material = selectedMaterial();
+    if (!material) {
+      setToast({ tone: "error", message: "設定を保存する教材を選択してください。" });
+      return;
+    }
+    const difficultyLabel =
+      difficultyOptions.find((item) => item.id === difficulty())?.label ?? difficulty();
+    setToast({
+      tone: "info",
+      message: `${materialDisplayName(material, selectedLibraryEntry())} の設定を下書きとして保持しました（難易度: ${difficultyLabel}, ${questionCount()}問, 温度 ${temperature().toFixed(1)}）。`,
+    });
+  };
+
+  const handleApplySettings = async () => {
+    const learningId = selectedLearningId();
+    const materialId = selectedMaterialId();
+    const targets = generationTargets();
+    if (!learningId || !materialId) {
+      setToast({ tone: "error", message: "生成する教材ファイルを選んでください。" });
+      return;
+    }
+    if (targets.length === 0) {
+      setToast({ tone: "error", message: "生成対象を1つ以上選択してください。" });
+      return;
+    }
+    const preset = settings.state.presets.find((item) => item.id === presetId());
+    const difficultyLabel =
+      difficultyOptions.find((item) => item.id === difficulty())?.label ?? difficulty();
+    const templateParts = [
+      preset?.userInstructionTemplate ?? "{{content}}",
+      "",
+      "# Material Settings",
+      `- difficulty: ${difficultyLabel}`,
+      `- question_count: ${questionCount()}`,
+      `- targets: ${targets.map((id) => generatedTypeLabels[id]).join(", ")}`,
+      `- temperature: ${temperature().toFixed(1)}`,
+    ].filter(Boolean);
+
+    setIsGenerating(true);
+    setToast(null);
+    try {
+      await generateFromMaterial({
+        learningId,
+        materialId,
+        types: targets,
+        presetTitle: preset ? `${preset.title} / ${difficultyLabel}` : `material_settings (${difficultyLabel})`,
+        presetSystemPrompt: preset?.systemPrompt,
+        presetUserTemplate: templateParts.join("\n"),
+      });
+      setToast({
+        tone: "success",
+        message: `${targets.length} 種類の生成リクエストを送信しました。学習詳細のタブで結果を確認できます。`,
+      });
+    } catch (error) {
+      setToast({
+        tone: "error",
+        message:
+          error instanceof Error ? `生成に失敗しました: ${error.message}` : "生成に失敗しました。",
+      });
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  return (
+    <section class="space-y-6">
+      <header class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+        <div>
+          <p class="text-xs font-semibold uppercase tracking-wide text-indigo-600">
+            教材設定
+          </p>
+          <h1 class="text-2xl font-bold text-slate-900">
+            教材ファイルと生成設定をまとめて調整
+          </h1>
+          <p class="text-sm text-slate-600">
+            PLAN.mdの仕様どおり、左でファイルを管理しつつ右で生成パラメータ・プリセットを操作します。
+          </p>
+          <p class="text-xs text-slate-500">
+            選択中: {selectedLearning()?.title ?? "学習カード未選択"}
+          </p>
         </div>
-      </div>
+        <div class="flex flex-wrap items-center gap-2">
+          <select
+            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+            value={selectedLearningId() ?? ""}
+            onChange={(event) => setSelectedLearningId(event.currentTarget.value)}
+            disabled={learnings.loading}
+          >
+            <Show
+              when={(learnings() ?? []).length > 0}
+              fallback={<option value="">学習カードなし</option>}
+            >
+              <For each={learnings() ?? []}>
+                {(learning) => (
+                  <option value={learning.id}>{learning.title}</option>
+                )}
+              </For>
+            </Show>
+          </select>
+          <button
+            class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+            onClick={openFilePicker}
+            disabled={!selectedLearningId() || isUploading()}
+          >
+            {isUploading() ? "読み込み中..." : "ファイルを追加"}
+          </button>
+        </div>
+      </header>
+      <input
+        type="file"
+        class="hidden"
+        ref={(element) => {
+          fileInputRef = element ?? undefined;
+        }}
+        accept=".pdf,image/*,audio/*,video/*,.txt,.md"
+        onChange={handleFileUpload}
+      />
+      <Show when={toast()}>
+        {(info) => (
+          <p
+            class={`text-xs ${
+              info().tone === "error"
+                ? "text-rose-600"
+                : info().tone === "success"
+                  ? "text-emerald-700"
+                  : "text-slate-600"
+            }`}
+          >
+            {info().message}
+          </p>
+        )}
+      </Show>
 
-      <div class="space-y-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-        <div class="grid gap-3 md:grid-cols-2">
+      <div class="grid gap-4 md:grid-cols-[1.1fr_1fr]">
+        <div class="space-y-3">
+          <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <p class="text-xs font-semibold uppercase text-slate-500">
+                教材ファイル
+              </p>
+              <div class="flex flex-wrap gap-2">
+                <For each={materialFilterOptions}>
+                  {(option) => (
+                    <button
+                      type="button"
+                      class={`rounded-full border px-3 py-1 text-xs font-semibold transition ${
+                        fileTypeFilter() === option.id
+                          ? "border-indigo-200 bg-indigo-50 text-indigo-700"
+                          : "border-slate-200 text-slate-700 hover:bg-slate-50"
+                      }`}
+                      onClick={() => setFileTypeFilter(option.id)}
+                    >
+                      {option.label}
+                    </button>
+                  )}
+                </For>
+              </div>
+            </div>
+            <Show
+              when={!materials.loading}
+              fallback={
+                <p class="mt-3 text-xs text-slate-500">教材ファイルを読み込み中です...</p>
+              }
+            >
+              <Show
+                when={filteredMaterials().length > 0}
+                fallback={
+                  <p class="mt-3 text-sm text-slate-600">
+                    この学習にはまだ教材ファイルがありません。右上の「ファイルを追加」から登録してください。
+                  </p>
+                }
+              >
+                <div class="mt-3 space-y-2">
+                  <For each={filteredMaterials()}>
+                    {(material) => {
+                      const entry = libraryEntryMap().get(material.id);
+                      const metaBytes = material.metadata?.payloadBytes as number | undefined;
+                      const sizeLabel = formatFileSize(entry?.bytes ?? metaBytes);
+                      const isDeleting = pendingDeleteId() === material.id;
+                      const isOpening = pendingOpenId() === material.id;
+                      return (
+                        <div
+                          class={`rounded-lg border px-3 py-2 text-sm transition ${
+                            selectedMaterialId() === material.id
+                              ? "border-indigo-300 bg-indigo-50"
+                              : "border-slate-200 bg-white"
+                          }`}
+                        >
+                          <button
+                            type="button"
+                            class="w-full text-left"
+                            onClick={() => setSelectedMaterialId(material.id)}
+                          >
+                            <div class="flex items-start justify-between gap-2">
+                              <div>
+                                <p class="font-semibold text-slate-900">
+                                  {materialDisplayName(material, entry)}
+                                </p>
+                                <p class="text-xs text-slate-600">
+                                  {materialTypeLabels[material.type]} / {sizeLabel}
+                                </p>
+                                <Show when={entry?.notes}>
+                                  {(note) => (
+                                    <p class="text-xs text-slate-500">メモ: {note()}</p>
+                                  )}
+                                </Show>
+                              </div>
+                              <span class="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-semibold uppercase text-slate-600">
+                                {material.type}
+                              </span>
+                            </div>
+                          </button>
+                          <div class="mt-2 flex flex-wrap gap-2 text-xs">
+                            <button
+                              class="rounded-md border border-slate-200 px-2 py-1 font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                              onClick={() => handleOpenMaterialSource(material.id)}
+                              disabled={isOpening}
+                            >
+                              {isOpening ? "開く中..." : "ソースを開く"}
+                            </button>
+                            <button
+                              class="rounded-md border border-rose-200 px-2 py-1 font-semibold text-rose-700 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60"
+                              onClick={() => handleDeleteMaterial(material.id)}
+                              disabled={isDeleting}
+                            >
+                              {isDeleting ? "削除中..." : "削除"}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    }}
+                  </For>
+                </div>
+              </Show>
+            </Show>
+          </div>
+
+          <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <p class="text-xs font-semibold uppercase text-slate-500">
+              プレビュー / メタデータ
+            </p>
+            <Show
+              when={selectedMaterial()}
+              fallback={<p class="mt-3 text-sm text-slate-600">教材ファイルを選択するとプレビューが表示されます。</p>}
+            >
+              {(material) => (
+                <div class="mt-3 space-y-3 text-sm text-slate-800">
+                  <div class="flex items-center justify-between gap-2">
+                    <p class="font-semibold text-slate-900">
+                      {materialDisplayName(material(), selectedLibraryEntry())}
+                    </p>
+                    <Show when={previewUrl()}>
+                      {(url) => (
+                        <A
+                          href={url()}
+                          target="_blank"
+                          rel="noreferrer"
+                          class="text-xs font-semibold text-indigo-600 hover:underline"
+                        >
+                          ソースを開く
+                        </A>
+                      )}
+                    </Show>
+                  </div>
+                  <Show when={isLoadingLocalPreview()}>
+                    <p class="text-xs text-slate-500">ローカルプレビューを読み込んでいます...</p>
+                  </Show>
+                  <div class="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                    <Switch fallback={<p class="text-xs text-slate-500">{previewError() ?? "ファイルの直接プレビューは利用できません。抽出テキストを確認してください。"}</p>}>
+                      <Match when={material().type === "image" && previewUrl()}>
+                        {(url) => (
+                          <img
+                            src={url()}
+                            alt={materialDisplayName(material(), selectedLibraryEntry())}
+                            class="max-h-64 w-full rounded object-contain"
+                          />
+                        )}
+                      </Match>
+                      <Match when={material().type === "pdf" && previewUrl()}>
+                        {(url) => (
+                          <iframe
+                            src={url()}
+                            title="pdf-preview"
+                            class="h-64 w-full rounded bg-white"
+                          />
+                        )}
+                      </Match>
+                      <Match when={material().type === "audio" && previewUrl()}>
+                        {(url) => (
+                          <audio controls class="w-full" src={url()}>
+                            お使いの環境では音声の再生に対応していません。
+                          </audio>
+                        )}
+                      </Match>
+                      <Match when={material().type === "video" && previewUrl()}>
+                        {(url) => (
+                          <video controls class="h-64 w-full rounded bg-black" src={url()}>
+                            お使いの環境では動画の再生に対応していません。
+                          </video>
+                        )}
+                      </Match>
+                      <Match when={material().type === "text"}>
+                        <p class="text-xs text-slate-600">
+                          テキスト教材です。下の抽出結果から内容を確認してください。
+                        </p>
+                      </Match>
+                    </Switch>
+                  </div>
+                  <div>
+                    <p class="text-xs font-semibold uppercase text-slate-500">
+                      抽出テキスト
+                    </p>
+                    <pre class="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded border border-slate-200 bg-slate-50 p-3 text-xs text-slate-800">
+                      {summarizeMaterialText(material().rawContent)}
+                    </pre>
+                  </div>
+                  <Show when={selectedMetadataEntries().length > 0}>
+                    <div>
+                      <p class="text-xs font-semibold uppercase text-slate-500">
+                        メタデータ
+                      </p>
+                      <dl class="mt-2 space-y-1 text-xs">
+                        <For each={selectedMetadataEntries()}>
+                          {([key, value]) => (
+                            <div class="flex items-center justify-between gap-2">
+                              <dt class="font-semibold text-slate-600">{key}</dt>
+                              <dd class="text-right text-slate-800">
+                                {typeof value === "string" ||
+                                typeof value === "number" ||
+                                typeof value === "boolean"
+                                  ? String(value)
+                                  : JSON.stringify(value)}
+                              </dd>
+                            </div>
+                          )}
+                        </For>
+                      </dl>
+                    </div>
+                  </Show>
+                  <Show when={selectedLibraryEntry()}>
+                    {(entry) => (
+                      <div>
+                        <p class="text-xs font-semibold uppercase text-slate-500">
+                          ライブラリ情報
+                        </p>
+                        <dl class="mt-2 space-y-1 text-xs">
+                          <div class="flex items-center justify-between gap-2">
+                            <dt class="text-slate-600">保存先</dt>
+                            <dd class="text-right">
+                              {entry().libraryPath ?? entry().storedPath}
+                            </dd>
+                          </div>
+                          <div class="flex items-center justify-between gap-2">
+                            <dt class="text-slate-600">サイズ</dt>
+                            <dd class="text-right">{formatFileSize(entry().bytes)}</dd>
+                          </div>
+                          <Show when={entry().notes}>
+                            {(note) => (
+                              <div class="flex items-center justify-between gap-2">
+                                <dt class="text-slate-600">メモ</dt>
+                                <dd class="text-right">{note()}</dd>
+                              </div>
+                            )}
+                          </Show>
+                        </dl>
+                      </div>
+                    )}
+                  </Show>
+                </div>
+              )}
+            </Show>
+          </div>
+        </div>
+
+        <div class="space-y-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+          <p class="text-xs font-semibold uppercase text-slate-500">
+            生成設定
+          </p>
           <div class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
             <p class="text-xs font-semibold uppercase text-slate-500">
               生成対象
             </p>
             <div class="mt-2 flex flex-col gap-2 text-sm text-slate-800">
-              <label class="flex items-center gap-2">
-                <input type="checkbox" checked />
-                一問一答
-              </label>
-              <label class="flex items-center gap-2">
-                <input type="checkbox" checked />
-                練習問題
-              </label>
-              <label class="flex items-center gap-2">
-                <input type="checkbox" />
-                ポッドキャスト
-              </label>
+              <For each={generationTargetOrder}>
+                {(type) => (
+                  <label class="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={generationTargets().includes(type)}
+                      onChange={() => toggleTarget(type)}
+                    />
+                    {generatedTypeLabels[type]}
+                  </label>
+                )}
+              </For>
+            </div>
+          </div>
+
+          <div class="grid gap-3 md:grid-cols-2">
+            <div class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+              <p class="text-xs font-semibold uppercase text-slate-500">
+                難易度と出題数
+              </p>
+              <div class="mt-2 space-y-2 text-sm text-slate-800">
+                <label class="flex items-center justify-between">
+                  <span>難易度</span>
+                  <select
+                    class="rounded-md border border-slate-200 px-2 py-1 text-sm text-slate-800"
+                    value={difficulty()}
+                    onChange={(event) => setDifficulty(event.currentTarget.value)}
+                  >
+                    <For each={difficultyOptions}>
+                      {(option) => (
+                        <option value={option.id}>{option.label}</option>
+                      )}
+                    </For>
+                  </select>
+                </label>
+                <label class="flex items-center justify-between">
+                  <span>出題数</span>
+                  <input
+                    type="number"
+                    min="1"
+                    max="20"
+                    value={questionCount()}
+                    class="w-20 rounded-md border border-slate-200 px-2 py-1 text-sm text-slate-800"
+                    onInput={(event) => {
+                      const value = Number(event.currentTarget.value);
+                      setQuestionCount(Number.isNaN(value) ? 1 : Math.max(1, Math.min(20, value)));
+                    }}
+                  />
+                </label>
+              </div>
+            </div>
+
+            <div class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+              <p class="text-xs font-semibold uppercase text-slate-500">
+                温度
+              </p>
+              <div class="mt-2 space-y-2 text-sm text-slate-800">
+                <label class="flex items-center justify-between">
+                  <span>サンプリング温度</span>
+                  <span class="text-xs text-slate-600">{temperature().toFixed(1)}</span>
+                </label>
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.1"
+                  value={temperature()}
+                  class="w-full"
+                  onInput={(event) => setTemperature(Number(event.currentTarget.value))}
+                />
+              </div>
             </div>
           </div>
 
           <div class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
             <p class="text-xs font-semibold uppercase text-slate-500">
-              難易度と出題数
+              AIプリセット
             </p>
-            <div class="mt-2 space-y-2 text-sm text-slate-800">
+            <div class="mt-2 flex flex-col gap-2 text-sm text-slate-800">
               <label class="flex items-center justify-between">
-                <span>難易度</span>
-                <select class="rounded-md border border-slate-200 px-2 py-1 text-sm text-slate-800">
-                  <option>基礎</option>
-                  <option>標準</option>
-                  <option>発展</option>
+                <span>教科プリセット</span>
+                <select
+                  class="rounded-md border border-slate-200 px-2 py-1 text-sm text-slate-800"
+                  value={presetId() ?? ""}
+                  onChange={(event) => setPresetId(event.currentTarget.value)}
+                >
+                  <Show
+                    when={presetOptions().length > 0}
+                    fallback={<option value="">プリセット未登録</option>}
+                  >
+                    <For each={presetOptions()}>
+                      {(option) => (
+                        <option value={option.value}>{option.label}</option>
+                      )}
+                    </For>
+                  </Show>
                 </select>
-              </label>
-              <label class="flex items-center justify-between">
-                <span>出題数</span>
-                <input
-                  type="number"
-                  min="1"
-                  max="10"
-                  value="5"
-                  class="w-20 rounded-md border border-slate-200 px-2 py-1 text-sm text-slate-800"
-                  aria-label="出題数"
-                />
               </label>
             </div>
           </div>
-        </div>
 
-        <div class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-          <p class="text-xs font-semibold uppercase text-slate-500">
-            AIプリセット
-          </p>
-          <div class="mt-2 flex flex-col gap-2 text-sm text-slate-800">
-            <label class="flex items-center justify-between">
-              <span>教科プリセット</span>
-              <select class="rounded-md border border-slate-200 px-2 py-1 text-sm text-slate-800">
-                <option>math_detail</option>
-                <option>english_translation</option>
-              </select>
-            </label>
-            <label class="flex items-center justify-between">
-              <span>温度</span>
-              <input
-                type="range"
-                min="0"
-                max="1"
-                step="0.1"
-                value="0.3"
-                class="w-36"
-                aria-label="temperature"
-              />
-            </label>
+          <div class="flex flex-wrap gap-2">
+            <button
+              class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+              onClick={handleSaveDraft}
+            >
+              下書き保存
+            </button>
+            <button
+              class="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
+              onClick={handleApplySettings}
+              disabled={isGenerating() || !selectedMaterialId()}
+            >
+              {isGenerating() ? "生成中..." : "生成を開始"}
+            </button>
           </div>
         </div>
-
-        <div class="flex flex-wrap gap-2">
-          <button class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">
-            下書き保存
-          </button>
-          <button class="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500">
-            生成を開始
-          </button>
-        </div>
       </div>
-    </div>
-  </section>
-);
+    </section>
+  );
+};
 
 const NewLearningSurface: Component = () => {
+  const newLearningDraft = useNewLearningDraft();
   const [sourceLearningId, setSourceLearningId] = createSignal<string>();
   const [selectedMaterialIds, setSelectedMaterialIds] = createSignal<string[]>([]);
   const [selectedContentIds, setSelectedContentIds] = createSignal<string[]>([]);
@@ -1912,17 +2756,34 @@ const NewLearningSurface: Component = () => {
   const [tags, setTags] = createSignal("");
   const [status, setStatus] = createSignal<string | null>(null);
   const [isCreating, setIsCreating] = createSignal(false);
+  const [hydratedDraftId, setHydratedDraftId] = createSignal<string | null>(null);
+  const [selectionDraftId, setSelectionDraftId] = createSignal<string | null>(null);
   const summarizeForDisplay = (value: unknown) =>
     (typeof value === "string" ? value : JSON.stringify(value ?? {}))
       .replace(/\s+/g, " ")
       .slice(0, 80);
 
   const [learnings] = createResource(() => true, () => fetchLearnings({ limit: 50 }));
+  const activeDraft = () => newLearningDraft.state.draft;
   createEffect(() => {
     const list = learnings();
-    if (list?.length && !sourceLearningId()) {
-      setSourceLearningId(list[0].id);
-    }
+    if (!list?.length) return;
+    if (sourceLearningId()) return;
+    const draft = activeDraft();
+    const first = draft && list.some((item) => item.id === draft.sourceLearningId)
+      ? draft.sourceLearningId
+      : list[0].id;
+    setSourceLearningId(first);
+  });
+  createEffect(() => {
+    const draft = activeDraft();
+    if (!draft) return;
+    if (hydratedDraftId() === draft.createdAt) return;
+    setSourceLearningId(draft.sourceLearningId);
+    setTitle(draft.title);
+    setTags(draft.tags.join(", "));
+    setHydratedDraftId(draft.createdAt);
+    setSelectionDraftId(null);
   });
 
   const [materials] = createResource(
@@ -1933,6 +2794,22 @@ const NewLearningSurface: Component = () => {
     () => sourceLearningId(),
     (id) => (id ? fetchContents(id).then((res) => res.items) : []),
   );
+  createEffect(() => {
+    const draft = activeDraft();
+    if (!draft) return;
+    if (hydratedDraftId() !== draft.createdAt) return;
+    if (selectionDraftId() === draft.createdAt) return;
+    const mats = materials();
+    const gens = generatedContents();
+    if (!mats || !gens) return;
+    setSelectedMaterialIds(
+      mats.filter((mat) => draft.recommendedMaterialIds.includes(mat.id)).map((mat) => mat.id),
+    );
+    setSelectedContentIds(
+      gens.filter((content) => draft.recommendedContentIds.includes(content.id)).map((content) => content.id),
+    );
+    setSelectionDraftId(draft.createdAt);
+  });
 
   const toggleSelection = (ids: string[], setIds: (value: string[]) => void, id: string) => {
     if (ids.includes(id)) {
@@ -1996,6 +2873,7 @@ const NewLearningSurface: Component = () => {
       );
       setSelectedMaterialIds([]);
       setSelectedContentIds([]);
+      newLearningDraft.clearDraft();
     } catch (error) {
       setStatus(
         error instanceof Error ? `作成に失敗しました: ${error.message}` : "作成に失敗しました。",
@@ -2014,16 +2892,47 @@ const NewLearningSurface: Component = () => {
         <h1 class="text-2xl font-bold text-slate-900">
           既存の教材・生成物を選んで新しいLearningとして保存
         </h1>
-        <p class="text-sm text-slate-600">
-          抽出元のLearningを選び、コピーしたい教材と生成コンテンツにチェックを入れて新規Learningを作成します。
-        </p>
-      </header>
+      <p class="text-sm text-slate-600">
+        抽出元のLearningを選び、コピーしたい教材と生成コンテンツにチェックを入れて新規Learningを作成します。
+      </p>
+    </header>
 
-      <div class="grid gap-4 md:grid-cols-[0.9fr_1fr_1fr]">
-        <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-          <p class="text-xs font-semibold uppercase text-slate-500">
-            ① 抽出元を選択
+    <Show when={activeDraft()}>
+      {(draft) => (
+        <div class="rounded-xl border border-indigo-200 bg-indigo-50 p-4 text-sm text-indigo-900">
+          <p class="text-xs font-semibold uppercase text-indigo-700">
+            AI抽出済みのドラフト
           </p>
+          <p class="mt-1 text-base font-semibold text-slate-900">{draft().title}</p>
+          <p class="text-xs text-indigo-700">
+            推薦: 教材 {draft().recommendedMaterialIds.length} 件 / 生成 {draft().recommendedContentIds.length} 件
+          </p>
+          <p class="mt-2 whitespace-pre-wrap text-xs text-slate-700">
+            {draft().reasoning ?? "抽出理由のメモはありません。"}
+          </p>
+          <div class="mt-3 flex flex-wrap gap-2">
+            <button
+              class="rounded-md border border-indigo-200 px-3 py-2 text-xs font-semibold text-indigo-700 hover:bg-white"
+              onClick={() => setSourceLearningId(draft().sourceLearningId)}
+            >
+              提案元のLearningに合わせる
+            </button>
+            <button
+              class="rounded-md border border-transparent px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-white/50"
+              onClick={() => newLearningDraft.clearDraft()}
+            >
+              ドラフトをクリア
+            </button>
+          </div>
+        </div>
+      )}
+    </Show>
+
+    <div class="grid gap-4 md:grid-cols-[0.9fr_1fr_1fr]">
+      <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <p class="text-xs font-semibold uppercase text-slate-500">
+          ① 抽出元を選択
+        </p>
           <div class="mt-2 space-y-2 text-sm text-slate-800">
             <For each={learnings() ?? []}>
               {(learning) => (

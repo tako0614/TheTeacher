@@ -7,7 +7,7 @@ import {
 
 type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 
-export type LearningRow = {
+export interface LearningRow {
   id: string;
   title: string;
   subject?: string | null;
@@ -15,9 +15,9 @@ export type LearningRow = {
   progress?: number | null;
   createdAt: string;
   updatedAt: string;
-};
+}
 
-export type MaterialRow = {
+export interface MaterialRow {
   id: string;
   learningId: string;
   type: MaterialType;
@@ -26,9 +26,9 @@ export type MaterialRow = {
   metadata?: string | null;
   createdAt: string;
   updatedAt: string;
-};
+}
 
-export type GeneratedContentRow = {
+export interface GeneratedContentRow {
   id: string;
   learningId: string;
   materialId?: string | null;
@@ -36,9 +36,9 @@ export type GeneratedContentRow = {
   content: string;
   promptPreset?: string | null;
   createdAt: string;
-};
+}
 
-export type PracticeSessionRow = {
+export interface PracticeSessionRow {
   id: string;
   learningId: string;
   generatedContentId?: string | null;
@@ -48,9 +48,9 @@ export type PracticeSessionRow = {
   feedback?: string | null;
   score?: number | null;
   createdAt: string;
-};
+}
 
-export type PresetRow = {
+export interface PresetRow {
   id: string;
   subject: string;
   title: string;
@@ -58,7 +58,7 @@ export type PresetRow = {
   userInstructionTemplate: string;
   createdAt: string;
   updatedAt: string;
-};
+}
 
 export type LearningWithStatsRow = LearningRow & {
   materialsCount: number;
@@ -67,7 +67,7 @@ export type LearningWithStatsRow = LearningRow & {
   lastStudiedAt?: string | null;
 };
 
-export type IngestJobRow = {
+export interface IngestJobRow {
   id: string;
   learningId?: string | null;
   source: string;
@@ -80,9 +80,9 @@ export type IngestJobRow = {
   notes?: string | null;
   outputMaterialId?: string | null;
   libraryPath?: string | null;
-};
+}
 
-export type LibraryEntryRow = {
+export interface LibraryEntryRow {
   id: string;
   displayName: string;
   storedPath: string;
@@ -95,7 +95,7 @@ export type LibraryEntryRow = {
   notes?: string | null;
   createdAt: string;
   updatedAt: string;
-};
+}
 
 export const parseJson = <T = JsonValue>(value?: string | null): T | undefined => {
   if (!value) return undefined;
@@ -112,8 +112,8 @@ export const mapIngestJob = (row: IngestJobRow): IngestJob => ({
   status: row.status as IngestJob["status"],
   source: parseJson(row.source)!,
   steps: parseJson(row.steps) ?? [],
-  preferredOcrEngine: row.preferredOcrEngine ?? undefined,
-  preferredTranscriptionEngine: row.preferredTranscriptionEngine ?? undefined,
+  preferredOcrEngine: (row.preferredOcrEngine as IngestJob["preferredOcrEngine"]) ?? undefined,
+  preferredTranscriptionEngine: (row.preferredTranscriptionEngine as IngestJob["preferredTranscriptionEngine"]) ?? undefined,
   requestedAt: row.requestedAt,
   updatedAt: row.updatedAt,
   notes: row.notes ?? undefined,
@@ -136,4 +136,4 @@ export const mapLibraryEntry = (row: LibraryEntryRow): MaterialLibraryEntry => (
   updatedAt: row.updatedAt,
 });
 
-export const toJson = (value?: JsonValue) => (value === undefined ? null : JSON.stringify(value));
+export const toJson = (value?: unknown) => (value === undefined ? null : JSON.stringify(value));

@@ -1,3 +1,4 @@
+import "katex/dist/katex.min.css";
 import "./index.css";
 
 import { render } from "solid-js/web";
