@@ -3,7 +3,9 @@
     "allow": [
       "Bash(tree:*)",
       "mcp__codex__codex",
-      "mcp__codex__codex-reply"
+      "mcp__codex__codex-reply",
+      "Bash(npm run build:*)",
+      "Bash(npx tsc:*)"
     ],
     "deny": [],
     "ask": []

@@ -43,6 +43,7 @@ import {
   semanticSearch,
 } from "../lib/ai";
 import { useAuth } from "../lib/auth-store";
+import { useToast } from "../lib/toast-store";
 import {
   createContent,
   createLearning,
@@ -120,11 +121,13 @@ const detailTabs = [
 
 const LearningListSurface: Component = () => {
   const navigate = useNavigate();
+  const toast = useToast();
   const [query, setQuery] = createSignal("");
   const [subject, setSubject] = createSignal("all");
   const [newTitle, setNewTitle] = createSignal("");
   const [newSubject, setNewSubject] = createSignal("");
   const [newTags, setNewTags] = createSignal("");
+  const [titleError, setTitleError] = createSignal("");
 
   const [learnings, { refetch }] = createResource(
     () => ({
@@ -138,7 +141,12 @@ const LearningListSurface: Component = () => {
 
   const createLearningCard = async () => {
     const title = newTitle().trim();
-    if (!title) return;
+    if (!title) {
+      setTitleError("タイトルを入力してください");
+      toast.showToast("タイトルを入力してください", "error");
+      return;
+    }
+    setTitleError("");
     const learning = await createLearning({
       title,
       subject: newSubject().trim() || undefined,
@@ -286,10 +294,16 @@ const LearningListSurface: Component = () => {
                       >
                         詳細を開く
                       </button>
-                      <button class="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-100">
+                      <button
+                        class="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-100"
+                        onClick={() => navigate(`/practice?id=${learning.id}`)}
+                      >
                         演習に進む
                       </button>
-                      <button class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-white">
+                      <button
+                        class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-white"
+                        onClick={() => openDetail(learning.id)}
+                      >
                         生成履歴
                       </button>
                     </div>
@@ -306,12 +320,24 @@ const LearningListSurface: Component = () => {
               新規学習
             </p>
             <div class="mt-2 space-y-2 text-sm text-slate-700">
-              <input
-                value={newTitle()}
-                onInput={(e) => setNewTitle(e.currentTarget.value)}
-                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-indigo-300 focus:outline-none focus:ring-2 focus:ring-indigo-100"
-                placeholder="タイトル（必須）"
-              />
+              <div>
+                <input
+                  value={newTitle()}
+                  onInput={(e) => {
+                    setNewTitle(e.currentTarget.value);
+                    if (titleError()) setTitleError("");
+                  }}
+                  class={`w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 ${
+                    titleError()
+                      ? "border-red-300 focus:border-red-400 focus:ring-red-100"
+                      : "border-slate-200 focus:border-indigo-300 focus:ring-indigo-100"
+                  }`}
+                  placeholder="タイトル（必須）"
+                />
+                <Show when={titleError()}>
+                  <p class="mt-1 text-xs text-red-600">{titleError()}</p>
+                </Show>
+              </div>
               <input
                 value={newSubject()}
                 onInput={(e) => setNewSubject(e.currentTarget.value)}
@@ -343,6 +369,7 @@ const LearningListSurface: Component = () => {
 
 const LearningDetailSurface: Component = () => {
   const navigate = useNavigate();
+  const toast = useToast();
   const settings = useSettings();
   const [searchParams, setSearchParams] = useSearchParams();
   const [tab, setTab] = createSignal<GeneratedContentType>(
@@ -502,13 +529,23 @@ const LearningDetailSurface: Component = () => {
     }
 
     const urlValue = materialFileName().trim() || materialSource();
+
+    // URL validation
+    if (materialType() === "url") {
+      if (!urlValue.startsWith("http://") && !urlValue.startsWith("https://")) {
+        setSaveMessage("有効なURL（http://またはhttps://で始まる）を入力してください。");
+        toast.showToast("有効なURLを入力してください", "error");
+        return;
+      }
+    }
+
     const source: MaterialIngestRequest["source"] =
       materialType() === "text"
         ? { kind: "text", text: textContent || materialSource() }
         : materialType() === "url"
           ? {
               kind: "url",
-              url: urlValue.startsWith("http") ? urlValue : "https://example.com",
+              url: urlValue,
             }
           : {
               kind: materialType() as Exclude<MaterialType, "text" | "url">,
@@ -540,15 +577,16 @@ const LearningDetailSurface: Component = () => {
       setMaterialBytes(undefined);
       setMaterialPayload(undefined);
       await refetchMaterials();
-      setSaveMessage(
-        `教材(${result.material.type})を保存し、抽出テキストを反映しました。`,
-      );
+      const successMsg = `教材(${result.material.type})を保存し、抽出テキストを反映しました。`;
+      setSaveMessage(successMsg);
+      toast.showToast(successMsg, "success");
     } catch (error) {
-      setSaveMessage(
-        error instanceof Error
-          ? `教材の追加に失敗しました: ${error.message}`
-          : "教材の追加に失敗しました。",
-      );
+      const errorMsg = error instanceof Error
+        ? `教材の追加に失敗しました: ${error.message}`
+        : "教材の追加に失敗しました。";
+      setSaveMessage(errorMsg);
+      toast.showToast(errorMsg, "error");
+      console.error(error);
     } finally {
       setIsIngesting(false);
     }
@@ -591,7 +629,9 @@ const LearningDetailSurface: Component = () => {
       console.error(error);
       setMaterialPayload(undefined);
       setMaterialText("");
-      setSaveMessage("ファイル処理に失敗しました。テキストを手入力してください。");
+      const errorMsg = "ファイル処理に失敗しました。テキストを手入力してください。";
+      setSaveMessage(errorMsg);
+      toast.showToast(errorMsg, "error");
     }
   };
 
@@ -615,19 +655,20 @@ const LearningDetailSurface: Component = () => {
         presetUserTemplate: preset?.userInstructionTemplate,
       });
       await refetchContents();
-      setSaveMessage(
-        `${generatedTypeLabels[tab()]} を ${result.items.length} 件生成しました。`,
-      );
+      const successMsg = `${generatedTypeLabels[tab()]} を ${result.items.length} 件生成しました。`;
+      setSaveMessage(successMsg);
+      toast.showToast(successMsg, "success");
       const generatedMaterialId = result.material?.id ?? materialId;
       if (generatedMaterialId) {
         setSelectedMaterialId(generatedMaterialId);
       }
     } catch (error) {
-      setSaveMessage(
-        error instanceof Error
-          ? `生成に失敗しました: ${error.message}`
-          : "生成に失敗しました。",
-      );
+      const errorMsg = error instanceof Error
+        ? `生成に失敗しました: ${error.message}`
+        : "生成に失敗しました。";
+      setSaveMessage(errorMsg);
+      toast.showToast(errorMsg, "error");
+      console.error(error);
     } finally {
       setIsGenerating(false);
     }
@@ -748,7 +789,13 @@ const LearningDetailSurface: Component = () => {
           >
             一覧に戻る
           </A>
-          <button class="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500">
+          <button
+            class="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500"
+            onClick={() => {
+              const id = learning()?.id;
+              if (id) navigate(`/practice?id=${id}`);
+            }}
+          >
             演習を開始
           </button>
         </div>
@@ -806,10 +853,13 @@ const LearningDetailSurface: Component = () => {
                 </For>
               </select>
               <button
-                class="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-70"
+                class="flex items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-70"
                 onClick={addGeneratedDraft}
                 disabled={isGenerating() || (materials() ?? []).length === 0}
               >
+                <Show when={isGenerating()}>
+                  <div class="h-4 w-4 animate-spin rounded-full border-2 border-indigo-700 border-t-transparent" />
+                </Show>
                 {isGenerating()
                   ? "生成中..."
                   : `${generatedTypeLabels[tab()]}生成`}
@@ -865,10 +915,57 @@ const LearningDetailSurface: Component = () => {
                               音声生成
                             </button>
                           </Show>
-                          <button class="rounded-md border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-white">
+                          <button
+                            class="rounded-md border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-white"
+                            onClick={() => {
+                              alert(
+                                `ID: ${item.id}\nタイプ: ${item.type}\n作成日時: ${formatDateTime(item.createdAt)}\n\n内容:\n${JSON.stringify(item.content, null, 2)}`,
+                              );
+                            }}
+                          >
                             詳細
                           </button>
-                          <button class="rounded-md border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-white">
+                          <button
+                            class="rounded-md border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-white"
+                            onClick={async () => {
+                              if (
+                                !confirm(
+                                  "このコンテンツを再生成しますか？既存の内容は保持されます。",
+                                )
+                              )
+                                return;
+                              const target = learning();
+                              if (!target) return;
+                              const preset = settings.state.presets.find(
+                                (p) => p.id === generationPresetId(),
+                              );
+                              setIsGenerating(true);
+                              try {
+                                await generateFromMaterial({
+                                  learningId: target.id,
+                                  materialId: item.materialId,
+                                  types: [item.type as GeneratedContentType],
+                                  presetId: preset?.id,
+                                  presetTitle: preset?.title,
+                                  presetSystemPrompt: preset?.systemPrompt,
+                                  presetUserTemplate: preset?.userInstructionTemplate,
+                                });
+                                await refetchContents();
+                                const successMsg = `${generatedTypeLabels[item.type ?? "other"]} を再生成しました。`;
+                                setSaveMessage(successMsg);
+                                toast.showToast(successMsg, "success");
+                              } catch (error) {
+                                const errorMsg = error instanceof Error
+                                  ? `再生成に失敗しました: ${error.message}`
+                                  : "再生成に失敗しました";
+                                setSaveMessage(errorMsg);
+                                toast.showToast(errorMsg, "error");
+                                console.error(error);
+                              } finally {
+                                setIsGenerating(false);
+                              }
+                            }}
+                          >
                             再生成
                           </button>
                         </div>
@@ -1137,10 +1234,13 @@ const LearningDetailSurface: Component = () => {
               {materialBytes() ? formatBytes(materialBytes()) : "サイズ未計測"}
             </div>
             <button
-              class="rounded-lg bg-indigo-600 px-4 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-70"
+              class="flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-70"
               onClick={handleAddMaterial}
               disabled={isIngesting()}
             >
+              <Show when={isIngesting()}>
+                <div class="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+              </Show>
               {isIngesting() ? "保存中..." : "教材を保存"}
             </button>
           </div>
@@ -1291,6 +1391,7 @@ const PracticeSurface: Component = () => {
   }
 
   const navigate = useNavigate();
+  const toast = useToast();
   const [mode, setMode] = createSignal<PracticeMode>("text");
   const [selectedLearningId, setSelectedLearningId] = createSignal<string>();
   const [questionIndex, setQuestionIndex] = createSignal(0);
@@ -1883,10 +1984,13 @@ const PracticeSurface: Component = () => {
               />
               <div class="flex flex-wrap gap-2 text-xs text-slate-600">
                 <button
-                  class="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-70"
+                  class="flex items-center gap-2 rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-70"
                   onClick={handleSubmit}
                   disabled={isSubmitting() || !answer().trim()}
                 >
+                  <Show when={isSubmitting()}>
+                    <div class="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                  </Show>
                   {isSubmitting() ? "採点中..." : "AI採点して送信"}
                 </button>
                 <button
@@ -2063,6 +2167,7 @@ const ChatSurface: Component = () => {
   const [toolNewLearningSubject, setToolNewLearningSubject] = createSignal("");
   const [isToolRunning, setIsToolRunning] = createSignal(false);
   const navigate = useNavigate();
+  const toast = useToast();
   const newLearningDraft = useNewLearningDraft();
 
   const activeDraft = () => newLearningDraft.state.draft;
@@ -2146,7 +2251,9 @@ const ChatSurface: Component = () => {
       }
     } catch (err) {
       console.error(err);
-      setError("Tool Callに失敗しました。もう一度お試しください。");
+      const errorMsg = "Tool Callに失敗しました。もう一度お試しください。";
+      setError(errorMsg);
+      toast.showToast(errorMsg, "error");
     } finally {
       setIsToolRunning(false);
     }
@@ -2206,7 +2313,9 @@ const ChatSurface: Component = () => {
       appendMessage("assistant", reply.reply);
     } catch (err) {
       console.error(err);
-      setError("Tool Call連携に失敗しました。もう一度お試しください。");
+      const errorMsg = "Tool Call連携に失敗しました。もう一度お試しください。";
+      setError(errorMsg);
+      toast.showToast(errorMsg, "error");
       setLastProxyActions(null);
       setGeneratedSummaries([]);
     } finally {
@@ -3449,10 +3558,13 @@ const MaterialSettingsSurface: Component = () => {
               下書き保存
             </button>
             <button
-              class="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
+              class="flex items-center gap-2 rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
               onClick={handleApplySettings}
               disabled={isGenerating() || !selectedMaterialId()}
             >
+              <Show when={isGenerating()}>
+                <div class="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+              </Show>
               {isGenerating() ? "生成中..." : "生成を開始"}
             </button>
           </div>

@@ -10,7 +10,9 @@ import {
 import { AuthProvider } from "./lib/auth-store";
 import { SettingsProvider } from "./lib/settings-store";
 import { NewLearningDraftProvider } from "./lib/new-learning-draft-store";
+import { ToastProvider } from "./lib/toast-store";
 import { surfaces } from "./surfaces";
+import ToastContainer from "./components/ToastContainer";
 
 const Nav: Component<{ activePath: Accessor<string> }> = (props) => (
   <nav class="space-y-2">
@@ -44,6 +46,7 @@ const AppShell: ParentComponent = (props) => {
 
   return (
     <div class="min-h-screen bg-slate-50 px-6 py-10">
+      <ToastContainer />
       <div class="mx-auto max-w-6xl overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
         <div class="grid gap-6 md:grid-cols-[280px_1fr]">
           <aside class="border-b border-slate-200 bg-slate-50/60 p-6 md:border-b-0 md:border-r">
@@ -80,14 +83,16 @@ const App: Component = () => (
   <AuthProvider>
     <SettingsProvider>
       <NewLearningDraftProvider>
-        <Router root={AppShell}>
-          <For each={surfaces}>
-            {(surface) => (
-              <Route path={surface.path} component={surface.component} />
-            )}
-          </For>
-          <Route path="*" component={surfaces[0].component} />
-        </Router>
+        <ToastProvider>
+          <Router root={AppShell}>
+            <For each={surfaces}>
+              {(surface) => (
+                <Route path={surface.path} component={surface.component} />
+              )}
+            </For>
+            <Route path="*" component={surfaces[0].component} />
+          </Router>
+        </ToastProvider>
       </NewLearningDraftProvider>
     </SettingsProvider>
   </AuthProvider>
