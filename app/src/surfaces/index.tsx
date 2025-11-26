@@ -123,12 +123,43 @@ const detailTabs = [
 const LearningListSurface: Component = () => {
   const navigate = useNavigate();
   const toast = useToast();
+  const settings = useSettings();
   const [query, setQuery] = createSignal("");
   const [subject, setSubject] = createSignal("all");
   const [newTitle, setNewTitle] = createSignal("");
   const [newSubject, setNewSubject] = createSignal("");
   const [newTags, setNewTags] = createSignal("");
   const [titleError, setTitleError] = createSignal("");
+  const [isImporting, setIsImporting] = createSignal(false);
+  let importInputRef: HTMLInputElement | undefined;
+
+  const handleImportFile = async (event: Event) => {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    setIsImporting(true);
+    try {
+      const snapshot = await parseSnapshotFile(file);
+      await replaceSnapshot(snapshot.db as SnapshotPayload);
+      settings.replaceState({
+        settings: snapshot.settings,
+        presets: snapshot.presets,
+      });
+      settings.markBackupTaken(snapshot.takenAt);
+      toast.showToast(`バックアップをインポートしました: ${file.name}`, "success");
+      refetch();
+    } catch (error) {
+      toast.showToast(
+        error instanceof Error ? `インポートに失敗しました: ${error.message}` : "インポートに失敗しました",
+        "error"
+      );
+    } finally {
+      input.value = "";
+      setIsImporting(false);
+    }
+  };
+
+  const triggerImport = () => importInputRef?.click();
 
   const [learnings, { refetch }] = createResource(
     () => ({
@@ -180,8 +211,19 @@ const LearningListSurface: Component = () => {
           </p>
         </div>
         <div class="flex gap-2">
-          <button class="rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50">
-            インポート
+          <input
+            type="file"
+            accept="application/json"
+            class="hidden"
+            ref={(el) => { importInputRef = el ?? undefined; }}
+            onChange={handleImportFile}
+          />
+          <button
+            class="rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+            onClick={triggerImport}
+            disabled={isImporting()}
+          >
+            {isImporting() ? "インポート中..." : "インポート"}
           </button>
           <button
             class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-500"
@@ -396,6 +438,7 @@ const LearningDetailSurface: Component = () => {
   const [saveMessage, setSaveMessage] = createSignal<string | null>(null);
   const [isIngesting, setIsIngesting] = createSignal(false);
   const [isGenerating, setIsGenerating] = createSignal(false);
+  const [isDraggingOver, setIsDraggingOver] = createSignal(false);
 
   const [learningList] = createResource(() => true, () =>
     fetchLearnings({ limit: 50 }),
@@ -603,6 +646,13 @@ const LearningDetailSurface: Component = () => {
     }
     setMaterialFileName(file.name);
     setMaterialBytes(file.size);
+
+    // ファイルの種類を自動検出して設定
+    const detectedType = detectMaterialTypeFromFile(file);
+    if (detectedType) {
+      setMaterialType(detectedType);
+    }
+
     try {
       const processed = await processMaterialFile(file, materialType());
       setMaterialPayload({
@@ -633,6 +683,38 @@ const LearningDetailSurface: Component = () => {
       const errorMsg = "ファイル処理に失敗しました。テキストを手入力してください。";
       setSaveMessage(errorMsg);
       toast.showToast(errorMsg, "error");
+    }
+  };
+
+  const detectMaterialTypeFromFile = (file: File): MaterialType | null => {
+    const name = file.name.toLowerCase();
+    if (file.type === "application/pdf" || name.endsWith(".pdf")) return "pdf";
+    if (file.type.startsWith("image/")) return "image";
+    if (file.type.startsWith("audio/")) return "audio";
+    if (file.type.startsWith("video/")) return "video";
+    if (file.type === "text/plain" || name.endsWith(".txt") || name.endsWith(".md")) return "text";
+    return null;
+  };
+
+  const handleDragOver = (event: DragEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setIsDraggingOver(true);
+  };
+
+  const handleDragLeave = (event: DragEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setIsDraggingOver(false);
+  };
+
+  const handleDrop = async (event: DragEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setIsDraggingOver(false);
+    const files = event.dataTransfer?.files;
+    if (files?.length) {
+      await handleFileInput(files);
     }
   };
 
@@ -900,21 +982,55 @@ const LearningDetailSurface: Component = () => {
                         </p>
                         <div class="mt-2 flex justify-end gap-2">
                           <Show when={item.type === "podcast_script"}>
-                            <button
-                              class="rounded-md border border-indigo-200 bg-indigo-50 px-2 py-1 text-xs font-semibold text-indigo-700 hover:bg-indigo-100"
-                              onClick={async () => {
-                                if (
-                                  !confirm(
-                                    "音声を生成しますか？ (数分かかる場合があります)",
-                                  )
-                                )
-                                  return;
-                                await requestTtsGeneration(item.id);
-                                setTimeout(refetchContents, 2000);
-                              }}
+                            <Show
+                              when={(item.content as Record<string, unknown>)?.audioUrl as string | undefined}
+                              fallback={
+                                <button
+                                  class="rounded-md border border-indigo-200 bg-indigo-50 px-2 py-1 text-xs font-semibold text-indigo-700 hover:bg-indigo-100"
+                                  onClick={async () => {
+                                    if (
+                                      !confirm(
+                                        "音声を生成しますか？ (数分かかる場合があります)",
+                                      )
+                                    )
+                                      return;
+                                    toast.showToast("音声生成を開始しました...", "info");
+                                    await requestTtsGeneration(item.id);
+                                    setTimeout(refetchContents, 2000);
+                                  }}
+                                >
+                                  音声生成
+                                </button>
+                              }
                             >
-                              音声生成
-                            </button>
+                              {(audioUrl) => (
+                                <div class="flex items-center gap-2">
+                                  <audio
+                                    controls
+                                    class="h-8 max-w-[200px]"
+                                    src={audioUrl()}
+                                  >
+                                    お使いの環境では音声の再生に対応していません。
+                                  </audio>
+                                  <button
+                                    class="rounded-md border border-indigo-200 bg-indigo-50 px-2 py-1 text-xs font-semibold text-indigo-700 hover:bg-indigo-100"
+                                    onClick={async () => {
+                                      if (
+                                        !confirm(
+                                          "音声を再生成しますか？",
+                                        )
+                                      )
+                                        return;
+                                      toast.showToast("音声を再生成しています...", "info");
+                                      await requestTtsGeneration(item.id);
+                                      setTimeout(refetchContents, 2000);
+                                    }}
+                                  >
+                                    再生成
+                                  </button>
+                                </div>
+                              )}
+                            </Show>
                           </Show>
                           <button
                             class="rounded-md border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-white"
@@ -1178,10 +1294,29 @@ const LearningDetailSurface: Component = () => {
       </div>
 
       <div class="grid gap-4 md:grid-cols-[2fr_1fr]">
-        <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-          <p class="text-xs font-semibold uppercase text-slate-500">
-            教材入力（テキスト/ファイル）
-          </p>
+        <div
+          class={`rounded-xl border-2 bg-white p-4 shadow-sm transition-all ${
+            isDraggingOver()
+              ? "border-indigo-400 bg-indigo-50 ring-2 ring-indigo-200"
+              : "border-slate-200"
+          }`}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+        >
+          <div class="flex items-center justify-between">
+            <p class="text-xs font-semibold uppercase text-slate-500">
+              教材入力（テキスト/ファイル）
+            </p>
+            <Show when={isDraggingOver()}>
+              <span class="flex items-center gap-1 rounded-full bg-indigo-100 px-2 py-1 text-xs font-semibold text-indigo-700">
+                <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                </svg>
+                ここにドロップ
+              </span>
+            </Show>
+          </div>
           <div class="mt-2 grid gap-3 md:grid-cols-2">
             <div class="space-y-2">
               <label class="text-xs font-semibold text-slate-600">
@@ -1200,17 +1335,34 @@ const LearningDetailSurface: Component = () => {
                   )}
                 </For>
               </select>
-              <input
-                type="file"
-                class="w-full text-sm"
-                onChange={(e) => void handleFileInput(e.currentTarget.files)}
-              />
+              <label
+                class={`flex cursor-pointer items-center justify-center rounded-lg border-2 border-dashed px-4 py-3 text-sm transition ${
+                  isDraggingOver()
+                    ? "border-indigo-400 bg-indigo-50 text-indigo-700"
+                    : "border-slate-300 text-slate-600 hover:border-indigo-300 hover:bg-slate-50"
+                }`}
+              >
+                <input
+                  type="file"
+                  class="sr-only"
+                  onChange={(e) => void handleFileInput(e.currentTarget.files)}
+                />
+                <span class="flex items-center gap-2">
+                  <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                  </svg>
+                  ファイルを選択またはドラッグ&ドロップ
+                </span>
+              </label>
               <input
                 value={materialFileName()}
                 onInput={(e) => setMaterialFileName(e.currentTarget.value)}
                 class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-indigo-300 focus:outline-none focus:ring-2 focus:ring-indigo-100"
                 placeholder="ファイル名 / URL / パス"
               />
+              <Show when={materialFileName()}>
+                <p class="text-xs text-slate-500">選択中: {materialFileName()}</p>
+              </Show>
             </div>
             <div class="space-y-2">
               <label class="text-xs font-semibold text-slate-600">
@@ -1596,7 +1748,9 @@ const PracticeSurface: Component = () => {
         setAnswer(processed.text.trim());
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "画像の取り込みに失敗しました。");
+      const errorMsg = err instanceof Error ? err.message : "画像の取り込みに失敗しました。";
+      setError(errorMsg);
+      toast.showToast(errorMsg, "error");
     } finally {
       setIsOcring(false);
     }
@@ -1672,14 +1826,12 @@ const PracticeSurface: Component = () => {
           title: question.title,
           prompt: question.prompt,
           expected: question.expected,
-        },
-        answerText: trimmed,
-        isCorrect: feedback.verdict === "correct",
-        feedback: {
-          ...feedback,
           mode: mode(),
           artifactName: handwritingCapture()?.fileName,
         },
+        answerText: trimmed,
+        isCorrect: feedback.verdict === "correct",
+        feedback,
         score: feedback.score,
       });
 
@@ -1750,8 +1902,36 @@ const PracticeSurface: Component = () => {
       <Show
         when={questions().length > 0}
         fallback={
-          <div class="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-sm text-slate-700">
-            練習用の生成コンテンツがまだありません。学習詳細で練習問題または一問一答を生成してから、ここで解答してください。
+          <div class="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-6 py-8 text-center">
+            <div class="mx-auto max-w-md space-y-4">
+              <div class="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-indigo-100">
+                <svg class="h-8 w-8 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
+                </svg>
+              </div>
+              <h3 class="text-lg font-semibold text-slate-900">練習問題がありません</h3>
+              <p class="text-sm text-slate-600">
+                選択した学習にはまだ練習問題や一問一答が生成されていません。
+                学習詳細画面で問題を生成してから演習を始めましょう。
+              </p>
+              <div class="flex flex-col items-center gap-2 sm:flex-row sm:justify-center">
+                <button
+                  class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-500"
+                  onClick={() => {
+                    const id = selectedLearningId();
+                    if (id) navigate(`/learning-detail?id=${id}`);
+                  }}
+                >
+                  学習詳細で生成する
+                </button>
+                <button
+                  class="rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+                  onClick={() => navigate("/")}
+                >
+                  別の学習を選ぶ
+                </button>
+              </div>
+            </div>
           </div>
         }
       >
@@ -2208,7 +2388,8 @@ const ChatSurface: Component = () => {
           result: results[0] ? results[0].label : "結果なし",
         },
       ]);
-    } catch (error) {
+    } catch (err) {
+      console.error("Semantic search failed:", err);
       const errorMsg = "意味検索に失敗しました";
       setError(errorMsg);
       toast.showToast(errorMsg, "error");
@@ -2358,6 +2539,30 @@ const ChatSurface: Component = () => {
             onClick={() => setToolCalls([])}
           >
             Tool Callをクリア
+          </button>
+          <button
+            class="rounded-lg border border-rose-200 px-3 py-2 text-xs font-semibold text-rose-700 hover:bg-rose-50"
+            onClick={() => {
+              setMessages([
+                {
+                  role: "assistant",
+                  content: "復習したい教材やテーマを教えてください。意味検索も同時に走らせます。",
+                },
+              ]);
+              setToolCalls([
+                {
+                  tool: "session_boot",
+                  detail: "チャットを初期化しました (semantic search enabled)",
+                },
+              ]);
+              setSemanticHits([]);
+              setLastProxyActions(null);
+              setGeneratedSummaries([]);
+              setError(null);
+              toast.showToast("チャット履歴をリセットしました", "info");
+            }}
+          >
+            会話をリセット
           </button>
         </div>
       </header>
@@ -3688,7 +3893,8 @@ const NewLearningSurface: Component = () => {
     if (selectionDraftId() === draft.createdAt) return;
     
     const sourceMats = materials();
-    const gens = generatedContents();
+    // Ensure generatedContents is loaded before proceeding
+    void generatedContents();
     
     // We wait for source materials to load if a source is selected
     if (draft.sourceLearningId && !sourceMats) return;
@@ -4042,7 +4248,7 @@ const NewLearningSurface: Component = () => {
                    <p class="font-semibold text-slate-600">追加済み教材 ({externalMaterials().length})</p>
                    <ul class="mt-1 list-disc pl-4 text-slate-600">
                      <For each={externalMaterials()}>
-                       {(mat) => <li>{mat.metadata?.name ?? mat.sourcePath ?? mat.type}</li>}
+                       {(mat) => <li>{String(mat.metadata?.name ?? mat.sourcePath ?? mat.type)}</li>}
                      </For>
                    </ul>
                  </div>

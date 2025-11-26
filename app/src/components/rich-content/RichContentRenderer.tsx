@@ -368,7 +368,7 @@ const MermaidDiagram: Component<{ content: string }> = (props) => {
             <details class="text-xs text-slate-400 mt-2">
               <summary class="cursor-pointer hover:text-slate-600">コードを表示</summary>
               <pre class="mt-2 p-2 bg-slate-50 rounded border border-slate-200 overflow-x-auto">
-                <code>{content}</code>
+                <code>{props.content}</code>
               </pre>
             </details>
           </div>
