@@ -6,6 +6,7 @@ import {
   backupSettingsSchema,
   presetSchema,
 } from "@theteacher/shared";
+import { logger } from "./logger";
 import {
   createContext,
   createEffect,
@@ -90,7 +91,7 @@ const parsePersisted = (raw: string | null): SettingsState => {
     );
     return { settings, presets };
   } catch (error) {
-    console.warn("Failed to parse settings store; falling back to defaults", error);
+    logger.warn("Failed to parse settings store, using defaults", "SettingsStore", error);
     return fallbackState;
   }
 };

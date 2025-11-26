@@ -218,19 +218,24 @@ export const fetchSnapshot = async (): Promise<SnapshotPayload> => {
 };
 
 export const replaceSnapshot = async (snapshot: SnapshotPayload) => {
+  // First, create all new data. If this fails, existing data remains intact.
+  try {
+    // Create learnings first (they are referenced by other entities)
+    await Promise.all(snapshot.learnings.map((learning) => createLearning(learning)));
+
+    // Then create materials, contents, and sessions in parallel
+    await Promise.all([
+      ...snapshot.materials.map((material) => createMaterial(material)),
+      ...snapshot.generatedContents.map((content) => createContent(content)),
+      ...snapshot.practiceSessions.map((session) => createSession(session)),
+    ]);
+  } catch (error) {
+    throw new Error(
+      `スナップショットの復元に失敗しました: ${error instanceof Error ? error.message : "Unknown error"}`,
+    );
+  }
+
+  // Only delete existing data after successful creation
   const current = await fetchLearnings({ limit: 100 });
   await Promise.all(current.map((item) => deleteLearning(item.id)));
-
-  for (const learning of snapshot.learnings) {
-    await createLearning(learning);
-  }
-  for (const material of snapshot.materials) {
-    await createMaterial(material);
-  }
-  for (const content of snapshot.generatedContents) {
-    await createContent(content);
-  }
-  for (const session of snapshot.practiceSessions) {
-    await createSession(session);
-  }
 };

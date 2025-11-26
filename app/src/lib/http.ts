@@ -32,7 +32,9 @@ export const requestJson = async <T>(config: RequestConfig): Promise<T> => {
     try {
       token = await ensureSessionToken();
     } catch (error) {
-      console.warn("Failed to bootstrap session token", error);
+      throw new Error(
+        `認証トークンの取得に失敗しました: ${error instanceof Error ? error.message : "Unknown error"}`,
+      );
     }
   }
 

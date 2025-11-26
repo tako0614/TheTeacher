@@ -12,17 +12,12 @@ const RelatedContent: Component<RelatedContentProps> = (props) => {
   const navigate = useNavigate();
   const [isVisible, setIsVisible] = createSignal(true);
 
-  const [related] = createResource(
+  const [related, { refetch }] = createResource(
     () => props.query.trim(),
     async (q) => {
       if (!q) return [];
-      try {
-        // Search for related content using the query
-        return await semanticSearch(q, 6);
-      } catch (error) {
-        console.error("Failed to fetch related content:", error);
-        return [];
-      }
+      // Search for related content using the query
+      return await semanticSearch(q, 6);
     }
   );
 
@@ -74,7 +69,21 @@ const RelatedContent: Component<RelatedContentProps> = (props) => {
             </div>
           </Show>
 
-          <Show when={!related.loading && related()?.length === 0}>
+          <Show when={related.error}>
+            <div class="flex flex-col items-center gap-2 py-3">
+              <p class="text-xs text-rose-600 text-center">
+                関連コンテンツの読み込みに失敗しました
+              </p>
+              <button
+                onClick={() => refetch()}
+                class="text-xs px-3 py-1 rounded-md bg-slate-100 text-slate-700 hover:bg-slate-200 transition-colors"
+              >
+                再試行
+              </button>
+            </div>
+          </Show>
+
+          <Show when={!related.loading && !related.error && related()?.length === 0}>
             <p class="text-xs text-slate-500 text-center py-2">関連するコンテンツは見つかりませんでした。</p>
           </Show>
 

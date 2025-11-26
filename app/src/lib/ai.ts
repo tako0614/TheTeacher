@@ -1,6 +1,7 @@
 import type { GeneratedContentType } from "@theteacher/shared";
 
 import { requestJson } from "./http";
+import { logger } from "./logger";
 
 export type ToolCallLog = {
   tool: string;
@@ -124,7 +125,7 @@ export const semanticSearch = async (
     });
     return applySemanticFilters(normalizeMatches(data.results), options);
   } catch (error) {
-    console.warn("semantic search fell back to local mock", error);
+    logger.warn("Semantic search API failed, using fallback", "AI", error);
     const filtered = applySemanticFilters(
       fallbackMatches.filter((match) =>
         match.label.toLowerCase().includes(query.toLowerCase()),
@@ -169,7 +170,7 @@ export const proxyChat = async (
       actions: data.actions,
     };
   } catch (error) {
-    console.warn("proxy chat fell back to local mock", error);
+    logger.warn("Proxy chat API failed, using fallback", "AI", error);
     return {
       reply:
         "バックエンドに接続できなかったのでローカルで検索した結果を提示します。",

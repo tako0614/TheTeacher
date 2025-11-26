@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { practiceFeedbackSchema } from "./practice";
 
 export const isoDateTimeString = z.string().datetime({ offset: true });
 
@@ -56,6 +57,17 @@ export const learningSchema = z.object({
   updatedAt: isoDateTimeString,
 });
 
+// Material metadata schema
+export const materialMetadataSchema = z
+  .object({
+    name: z.string().optional(),
+    payloadFileName: z.string().optional(),
+    payloadBytes: z.number().optional(),
+    previewUrl: z.string().optional(),
+    payloadDataUrlPreview: z.string().optional(),
+  })
+  .passthrough(); // Allow additional properties
+
 export const materialSchema = z.object({
   id: z.string().uuid(),
   userId: z.string().uuid().optional(),
@@ -63,7 +75,7 @@ export const materialSchema = z.object({
   type: materialTypeSchema,
   sourcePath: z.string().url().or(z.string().min(1)).optional(),
   rawContent: z.string().optional(),
-  metadata: z.record(z.string(), z.unknown()).optional(),
+  metadata: materialMetadataSchema.optional(),
   createdAt: isoDateTimeString,
   updatedAt: isoDateTimeString,
 });
@@ -79,15 +91,23 @@ export const generatedContentSchema = z.object({
   createdAt: isoDateTimeString,
 });
 
+// Practice session question reference schema
+export const questionRefSchema = z
+  .object({
+    title: z.string().optional(),
+    prompt: z.string().optional(),
+  })
+  .passthrough(); // Allow additional properties
+
 export const practiceSessionSchema = z.object({
   id: z.string().uuid(),
   userId: z.string().uuid().optional(),
   learningId: z.string().uuid(),
   generatedContentId: z.string().uuid().optional(),
-  questionRef: z.record(z.string(), z.unknown()).optional(),
+  questionRef: questionRefSchema.optional(),
   answerText: z.string().min(1),
   isCorrect: z.boolean().optional(),
-  feedback: z.record(z.string(), z.unknown()).optional(),
+  feedback: practiceFeedbackSchema.optional(),
   score: z.number().min(0).max(1).optional(),
   createdAt: isoDateTimeString,
 });
@@ -127,8 +147,10 @@ export type User = z.infer<typeof userSchema>;
 export type UserSession = z.infer<typeof userSessionSchema>;
 export type Learning = z.infer<typeof learningSchema>;
 export type Material = z.infer<typeof materialSchema>;
+export type MaterialMetadata = z.infer<typeof materialMetadataSchema>;
 export type GeneratedContent = z.infer<typeof generatedContentSchema>;
 export type PracticeSession = z.infer<typeof practiceSessionSchema>;
+export type QuestionRef = z.infer<typeof questionRefSchema>;
 export type Preset = z.infer<typeof presetSchema>;
 export type SemanticNode = z.infer<typeof semanticNodeSchema>;
 export type MaterialType = z.infer<typeof materialTypeSchema>;

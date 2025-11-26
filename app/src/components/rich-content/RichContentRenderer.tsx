@@ -10,6 +10,7 @@ import {
   Match,
   Switch,
 } from "solid-js";
+import { logger } from "../../lib/logger";
 
 import type {
   RichContentBlock,
@@ -347,9 +348,9 @@ const MermaidDiagram: Component<{ content: string }> = (props) => {
         setSvg(renderedSvg);
         setError(null);
       } catch (e) {
-        console.error(e);
-        // Mermaid sometimes fails but we don't want to crash the app
-        setError("Failed to render diagram");
+        logger.error("Mermaid diagram rendering failed", "RichContentRenderer", e);
+        const errorMsg = e instanceof Error ? e.message : "図の描画に失敗しました";
+        setError(errorMsg);
       }
     };
     
@@ -357,12 +358,27 @@ const MermaidDiagram: Component<{ content: string }> = (props) => {
   });
 
   return (
-    <div class="overflow-x-auto bg-white p-4 rounded-lg border border-slate-200 flex justify-center">
-      <Show when={error()}>
-        <p class="text-red-500 text-sm">{error()}</p>
+    <div class="overflow-x-auto bg-white p-4 rounded-lg border border-slate-200">
+      <Show
+        when={!error()}
+        fallback={
+          <div class="flex flex-col items-center gap-2 py-4">
+            <p class="text-rose-600 text-sm font-semibold">図の描画に失敗しました</p>
+            <p class="text-slate-500 text-xs max-w-md text-center">{error()}</p>
+            <details class="text-xs text-slate-400 mt-2">
+              <summary class="cursor-pointer hover:text-slate-600">コードを表示</summary>
+              <pre class="mt-2 p-2 bg-slate-50 rounded border border-slate-200 overflow-x-auto">
+                <code>{content}</code>
+              </pre>
+            </details>
+          </div>
+        }
+      >
+        <div class="flex justify-center">
+          {/* eslint-disable-next-line solid/no-innerhtml */}
+          <div innerHTML={svg()} />
+        </div>
       </Show>
-      {/* eslint-disable-next-line solid/no-innerhtml */}
-      <div innerHTML={svg()} />
     </div>
   );
 };

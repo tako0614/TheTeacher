@@ -2,6 +2,7 @@ import type { MaterialType } from "@theteacher/shared";
 import OCRAD from "ocrad.js";
 import * as pdfjsLib from "pdfjs-dist";
 import pdfjsWorker from "pdfjs-dist/build/pdf.worker?url";
+import { logger } from "./logger";
 
 const { GlobalWorkerOptions, getDocument } = pdfjsLib as typeof import("pdfjs-dist");
 
@@ -94,7 +95,7 @@ export const processMaterialFile = async (
       try {
         payload.dataUrl = await readFileAsDataUrl(file);
       } catch (error) {
-        console.warn("failed to capture pdf data url", error);
+        logger.warn("Failed to capture PDF data URL", "FileProcessing", error);
       }
     }
     return payload;
@@ -105,7 +106,7 @@ export const processMaterialFile = async (
     try {
       text = await extractImageText(file);
     } catch (error) {
-      console.warn("OCR failed", error);
+      logger.warn("OCR failed", "FileProcessing", error);
     }
 
     const payload: ProcessedMaterial = {
@@ -119,7 +120,7 @@ export const processMaterialFile = async (
       try {
         payload.dataUrl = await readFileAsDataUrl(file);
       } catch (error) {
-        console.warn("failed to capture data url", error);
+        logger.warn("Failed to capture image data URL", "FileProcessing", error);
       }
     }
 
@@ -144,7 +145,7 @@ export const processMaterialFile = async (
     try {
       payload.dataUrl = await readFileAsDataUrl(file);
     } catch (error) {
-      console.warn("failed to encode media as data url", error);
+      logger.warn("Failed to encode media as data URL", "FileProcessing", error);
       throw new Error("音声/動画を読み込めませんでした。もう一度お試しください。");
     }
 

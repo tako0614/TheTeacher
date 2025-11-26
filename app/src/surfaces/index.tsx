@@ -44,6 +44,7 @@ import {
 } from "../lib/ai";
 import { useAuth } from "../lib/auth-store";
 import { useToast } from "../lib/toast-store";
+import { logger } from "../lib/logger";
 import {
   createContent,
   createLearning,
@@ -586,7 +587,7 @@ const LearningDetailSurface: Component = () => {
         : "教材の追加に失敗しました。";
       setSaveMessage(errorMsg);
       toast.showToast(errorMsg, "error");
-      console.error(error);
+      logger.error("Failed to save material", "MaterialSurface", error);
     } finally {
       setIsIngesting(false);
     }
@@ -626,7 +627,7 @@ const LearningDetailSurface: Component = () => {
         }
       }
     } catch (error) {
-      console.error(error);
+      logger.error("Failed to process file", "MaterialSurface", error);
       setMaterialPayload(undefined);
       setMaterialText("");
       const errorMsg = "ファイル処理に失敗しました。テキストを手入力してください。";
@@ -668,7 +669,7 @@ const LearningDetailSurface: Component = () => {
         : "生成に失敗しました。";
       setSaveMessage(errorMsg);
       toast.showToast(errorMsg, "error");
-      console.error(error);
+      logger.error("Failed to generate content", "MaterialSurface", error);
     } finally {
       setIsGenerating(false);
     }
@@ -960,7 +961,7 @@ const LearningDetailSurface: Component = () => {
                                   : "再生成に失敗しました";
                                 setSaveMessage(errorMsg);
                                 toast.showToast(errorMsg, "error");
-                                console.error(error);
+                                logger.error("Failed to regenerate content", "MaterialSurface", error);
                               } finally {
                                 setIsGenerating(false);
                               }
@@ -2196,16 +2197,22 @@ const ChatSurface: Component = () => {
     setMessages((prev) => [...prev, { role, content }]);
 
   const runSemanticSearch = async (query: string) => {
-    const results = await semanticSearch(query, 4);
-    setSemanticHits(results);
-    setToolCalls((prev) => [
-      ...prev,
-      {
-        tool: "semantic_search",
-        detail: `query="${query.slice(0, 24)}" topK=${results.length}`,
-        result: results[0] ? results[0].label : "結果なし",
-      },
-    ]);
+    try {
+      const results = await semanticSearch(query, 4);
+      setSemanticHits(results);
+      setToolCalls((prev) => [
+        ...prev,
+        {
+          tool: "semantic_search",
+          detail: `query="${query.slice(0, 24)}" topK=${results.length}`,
+          result: results[0] ? results[0].label : "結果なし",
+        },
+      ]);
+    } catch (error) {
+      const errorMsg = "意味検索に失敗しました";
+      setError(errorMsg);
+      toast.showToast(errorMsg, "error");
+    }
   };
 
   const runToolCall = async (tool: ToolName, params: Record<string, unknown>) => {
@@ -2250,7 +2257,7 @@ const ChatSurface: Component = () => {
         }
       }
     } catch (err) {
-      console.error(err);
+      logger.error("Tool call failed", "ProxyChat", err);
       const errorMsg = "Tool Callに失敗しました。もう一度お試しください。";
       setError(errorMsg);
       toast.showToast(errorMsg, "error");
@@ -2312,7 +2319,7 @@ const ChatSurface: Component = () => {
       setSemanticHits(nextHits);
       appendMessage("assistant", reply.reply);
     } catch (err) {
-      console.error(err);
+      logger.error("Proxy chat failed", "ProxyChat", err);
       const errorMsg = "Tool Call連携に失敗しました。もう一度お試しください。";
       setError(errorMsg);
       toast.showToast(errorMsg, "error");
@@ -2625,14 +2632,21 @@ const ChatSurface: Component = () => {
               </button>
               <button
                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-70"
-                onClick={() => {
+                onClick={async () => {
                   setLastProxyActions(null);
                   setGeneratedSummaries([]);
-                  void runSemanticSearch(draft());
+                  setError(null);
+                  setIsSending(true);
+                  try {
+                    await runSemanticSearch(draft());
+                  } finally {
+                    setIsSending(false);
+                    setDraft("");
+                  }
                 }}
                 disabled={isSending() || !draft().trim()}
               >
-                意味検索のみ
+                {isSending() ? "検索中..." : "意味検索のみ"}
               </button>
             </div>
             <Show when={error()}>
@@ -2739,7 +2753,7 @@ const convertLocalPathToUrl = async (path: string) => {
     const { convertFileSrc } = await import("@tauri-apps/api/core");
     return convertFileSrc(path);
   } catch (error) {
-    console.warn("Failed to convertFileSrc", error);
+    logger.warn("Failed to convert file src", "Tauri", error);
     return undefined;
   }
 };
@@ -2974,7 +2988,7 @@ const MaterialSettingsSurface: Component = () => {
         message: `${materialTypeLabels[result.material.type]} を取り込みました。`,
       });
     } catch (error) {
-      console.error(error);
+      logger.error("Failed to import material", "NewLearningSurface", error);
       setToast({
         tone: "error",
         message:
@@ -4319,6 +4333,7 @@ const AppSettingsSurface: Component = () => {
   const navigate = useNavigate();
   const settings = useSettings();
   const auth = useAuth();
+  const toast = useToast();
   const defaultDeviceName =
     typeof navigator !== "undefined" ? navigator.userAgent.slice(0, 30) : "desktop";
   const [email, setEmail] = createSignal(auth.state.user?.email ?? "");
@@ -4354,13 +4369,16 @@ const AppSettingsSurface: Component = () => {
       );
       await downloadSnapshot(snapshot);
       settings.markBackupTaken(snapshot.takenAt);
-      setBackupMessage("バックアップを書き出しました");
+      const successMsg = "バックアップを書き出しました";
+      setBackupMessage(successMsg);
+      toast.showToast(successMsg, "success");
     } catch (error) {
-      setBackupError(
+      const errorMsg =
         error instanceof Error
           ? error.message
-          : "バックアップのエクスポートに失敗しました",
-      );
+          : "バックアップのエクスポートに失敗しました";
+      setBackupError(errorMsg);
+      toast.showToast(errorMsg, "error");
     } finally {
       setIsExporting(false);
     }
@@ -4380,13 +4398,16 @@ const AppSettingsSurface: Component = () => {
         presets: snapshot.presets,
       });
       settings.markBackupTaken(snapshot.takenAt);
-      setBackupMessage(`バックアップを適用しました: ${file.name}`);
+      const successMsg = `バックアップを適用しました: ${file.name}`;
+      setBackupMessage(successMsg);
+      toast.showToast(successMsg, "success");
     } catch (error) {
-      setBackupError(
+      const errorMsg =
         error instanceof Error
           ? error.message
-          : "バックアップの読み込みに失敗しました",
-      );
+          : "バックアップの読み込みに失敗しました";
+      setBackupError(errorMsg);
+      toast.showToast(errorMsg, "error");
     } finally {
       target.value = "";
       setIsImporting(false);
