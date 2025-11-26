@@ -8,14 +8,57 @@ const isTauri = () =>
   typeof (globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ !==
     "undefined";
 
-export type RequestConfig = {
+// ユーザーフレンドリーなエラーメッセージへの変換
+const friendlyErrorMessages: Record<number, string> = {
+  400: "リクエストの形式が正しくありません",
+  401: "認証が必要です。再ログインしてください",
+  403: "この操作を行う権限がありません",
+  404: "リソースが見つかりませんでした",
+  408: "リクエストがタイムアウトしました",
+  429: "リクエストが多すぎます。しばらく待ってから再試行してください",
+  500: "サーバーエラーが発生しました",
+  502: "サーバーに接続できませんでした",
+  503: "サービスが一時的に利用できません",
+  504: "サーバーからの応答がタイムアウトしました",
+};
+
+export const formatApiError = (error: unknown): string => {
+  if (!(error instanceof Error)) return "予期しないエラーが発生しました";
+  
+  const message = error.message;
+  
+  // ネットワークエラー
+  if (message.includes("fetch") || message.includes("network") || message.includes("Failed to fetch")) {
+    return "ネットワーク接続を確認してください";
+  }
+  
+  // APIエラー（ステータスコード含む）
+  const statusMatch = message.match(/API error (\d{3})/);
+  if (statusMatch) {
+    const status = parseInt(statusMatch[1], 10);
+    const friendly = friendlyErrorMessages[status];
+    if (friendly) return friendly;
+    if (status >= 500) return "サーバーエラーが発生しました";
+    if (status >= 400) return "リクエストに問題があります";
+  }
+  
+  // 認証エラー
+  if (message.includes("認証") || message.includes("auth") || message.includes("token")) {
+    return "認証エラーが発生しました。再ログインしてください";
+  }
+  
+  // その他：元のメッセージを短縮して返す
+  return message.length > 100 ? `${message.slice(0, 100)}...` : message;
+};
+
+export interface RequestConfig {
   path: string;
   method?: "GET" | "POST" | "PUT" | "DELETE";
   query?: Record<string, string | number | undefined>;
   body?: unknown;
   headers?: Record<string, string>;
   skipAuth?: boolean;
-};
+}
 
 const buildUrl = (path: string, query?: RequestConfig["query"]) => {
   const url = new URL(path, API_BASE_URL);

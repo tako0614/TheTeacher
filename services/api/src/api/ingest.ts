@@ -418,15 +418,127 @@ const stripHtml = (value: string) =>
     .replace(/\s+/g, " ")
     .trim();
 
+/**
+ * メインコンテンツ領域を抽出する高度なHTML解析
+ * - <article>, <main>, role="main" などの意味的要素を優先
+ * - ナビゲーション、フッター、サイドバーを除外
+ * - 見出しと段落を構造化して抽出
+ */
+const extractMainContent = (html: string): string => {
+  // 不要な要素を除去
+  const cleaned = html
+    .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, "")
+    .replace(/<style[\s\S]*?>[\s\S]*?<\/style>/gi, "")
+    .replace(/<nav[\s\S]*?>[\s\S]*?<\/nav>/gi, "")
+    .replace(/<footer[\s\S]*?>[\s\S]*?<\/footer>/gi, "")
+    .replace(/<header[\s\S]*?>[\s\S]*?<\/header>/gi, "")
+    .replace(/<aside[\s\S]*?>[\s\S]*?<\/aside>/gi, "")
+    .replace(/<!--[\s\S]*?-->/g, "");
+
+  // メインコンテンツ領域を探す
+  const mainPatterns = [
+    /<article[^>]*>([\s\S]*?)<\/article>/gi,
+    /<main[^>]*>([\s\S]*?)<\/main>/gi,
+    /<div[^>]+role=["']main["'][^>]*>([\s\S]*?)<\/div>/gi,
+    /<div[^>]+class=["'][^"']*(?:content|article|post|entry)[^"']*["'][^>]*>([\s\S]*?)<\/div>/gi,
+  ];
+
+  let mainContent = "";
+  for (const pattern of mainPatterns) {
+    const matches = cleaned.matchAll(pattern);
+    for (const match of matches) {
+      mainContent += match[1] + "\n";
+    }
+    if (mainContent.length > 200) break;
+  }
+
+  // メインコンテンツが見つからない場合は全体を使用
+  const targetHtml = mainContent.length > 200 ? mainContent : cleaned;
+
+  // 見出しを抽出して構造化
+  const headings: string[] = [];
+  const h1Matches = targetHtml.matchAll(/<h1[^>]*>([\s\S]*?)<\/h1>/gi);
+  const h2Matches = targetHtml.matchAll(/<h2[^>]*>([\s\S]*?)<\/h2>/gi);
+  const h3Matches = targetHtml.matchAll(/<h3[^>]*>([\s\S]*?)<\/h3>/gi);
+  
+  for (const match of h1Matches) {
+    const text = stripHtml(match[1]).trim();
+    if (text) headings.push(`# ${text}`);
+  }
+  for (const match of h2Matches) {
+    const text = stripHtml(match[1]).trim();
+    if (text) headings.push(`## ${text}`);
+  }
+  for (const match of h3Matches) {
+    const text = stripHtml(match[1]).trim();
+    if (text) headings.push(`### ${text}`);
+  }
+
+  // 段落を抽出
+  const paragraphs: string[] = [];
+  const pMatches = targetHtml.matchAll(/<p[^>]*>([\s\S]*?)<\/p>/gi);
+  for (const match of pMatches) {
+    const text = stripHtml(match[1]).trim();
+    if (text.length > 20) {
+      paragraphs.push(text);
+    }
+  }
+
+  // リストアイテムを抽出
+  const listItems: string[] = [];
+  const liMatches = targetHtml.matchAll(/<li[^>]*>([\s\S]*?)<\/li>/gi);
+  for (const match of liMatches) {
+    const text = stripHtml(match[1]).trim();
+    if (text.length > 10) {
+      listItems.push(`• ${text}`);
+    }
+  }
+
+  // 構造化されたコンテンツを組み立て
+  const structured = [
+    ...headings.slice(0, 20),
+    "",
+    ...paragraphs.slice(0, 50),
+    "",
+    ...listItems.slice(0, 30),
+  ].join("\n");
+
+  // 構造化コンテンツが十分な場合はそれを返す
+  if (structured.trim().length > 500) {
+    return structured.trim();
+  }
+
+  // フォールバック: 全体からテキストを抽出
+  return stripHtml(targetHtml);
+};
+
 const extractHtmlSummary = (html: string) => {
   const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
   const metaDescriptionMatch =
     html.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["']/i) ??
     html.match(/<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["']/i);
-  const title = titleMatch?.[1]?.trim();
+  const metaKeywordsMatch = 
+    html.match(/<meta[^>]+name=["']keywords["'][^>]+content=["']([^"']+)["']/i);
+  const ogTitleMatch =
+    html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i);
+  
+  const title = ogTitleMatch?.[1]?.trim() || titleMatch?.[1]?.trim();
   const description = metaDescriptionMatch?.[1]?.trim();
-  const cleaned = stripHtml(html);
-  return [title, description, cleaned].filter(Boolean).join("\n").slice(0, 16_000);
+  const keywords = metaKeywordsMatch?.[1]?.trim();
+  
+  // 高度なメインコンテンツ抽出を使用
+  const mainContent = extractMainContent(html);
+  
+  const parts = [
+    title ? `タイトル: ${title}` : null,
+    description ? `概要: ${description}` : null,
+    keywords ? `キーワード: ${keywords}` : null,
+    "",
+    "=== 本文 ===",
+    mainContent,
+  ].filter((part) => part !== null);
+  
+  return parts.join("\n").slice(0, 24_000);
 };
 
 const fetchRemoteText = async (url: string): Promise<string> => {

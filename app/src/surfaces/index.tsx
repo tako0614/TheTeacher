@@ -8,6 +8,7 @@ import {
   createMemo,
   createResource,
   createSignal,
+  onCleanup,
   onMount,
   type Component,
 } from "solid-js";
@@ -45,6 +46,7 @@ import {
 import { useAuth } from "../lib/auth-store";
 import { useToast } from "../lib/toast-store";
 import { logger } from "../lib/logger";
+import { formatApiError } from "../lib/http";
 import {
   createContent,
   createLearning,
@@ -84,8 +86,171 @@ const subjects = [
   { id: "programming", label: "プログラミング" },
 ];
 
+// 選択用（編集・作成時に使用）- "all" を除外し "未設定" を追加
+const subjectSelectOptions = [
+  { id: "", label: "未設定" },
+  { id: "math", label: "数学" },
+  { id: "english", label: "英語" },
+  { id: "science", label: "理科" },
+  { id: "social", label: "社会" },
+  { id: "programming", label: "プログラミング" },
+  { id: "other", label: "その他" },
+];
+
 const subjectLabel = (value?: string | null) =>
   subjects.find((item) => item.id === value)?.label ?? value ?? "未設定";
+
+// デバウンスフック - 検索入力のパフォーマンス改善
+function createDebouncedSignal<T>(initialValue: T, delay = 300) {
+  const [value, setValue] = createSignal<T>(initialValue);
+  const [debouncedValue, setDebouncedValue] = createSignal<T>(initialValue);
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+  createEffect(() => {
+    const currentValue = value();
+    if (timeoutId) clearTimeout(timeoutId);
+    timeoutId = setTimeout(() => {
+      setDebouncedValue(() => currentValue);
+    }, delay);
+  });
+
+  onCleanup(() => {
+    if (timeoutId) clearTimeout(timeoutId);
+  });
+
+  return [value, setValue, debouncedValue] as const;
+}
+
+// 削除確認ダイアログコンポーネント
+interface ConfirmDialogProps {
+  isOpen: boolean;
+  title: string;
+  message: string;
+  confirmLabel?: string;
+  cancelLabel?: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+  isLoading?: boolean;
+}
+
+const ConfirmDialog: Component<ConfirmDialogProps> = (props) => {
+  // Escapeキーでキャンセル
+  createEffect(() => {
+    if (!props.isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !props.isLoading) {
+        props.onCancel();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    onCleanup(() => window.removeEventListener("keydown", handleKeyDown));
+  });
+
+  return (
+    <Show when={props.isOpen}>
+      <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => props.onCancel()}>
+        <div 
+          class="mx-4 w-full max-w-md rounded-xl bg-white p-6 shadow-xl"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <h3 class="text-lg font-bold text-slate-900">{props.title}</h3>
+          <p class="mt-2 text-sm text-slate-600">{props.message}</p>
+          <div class="mt-6 flex justify-end gap-3">
+            <button
+              class="rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:opacity-60"
+              onClick={() => props.onCancel()}
+              disabled={props.isLoading}
+            >
+              {props.cancelLabel ?? "キャンセル"}
+            </button>
+            <button
+              class="flex items-center gap-2 rounded-lg bg-rose-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-rose-500 disabled:opacity-60"
+              onClick={() => props.onConfirm()}
+              disabled={props.isLoading}
+            >
+              <Show when={props.isLoading}>
+                <Spinner size="sm" color="white" />
+              </Show>
+              {props.confirmLabel ?? "削除"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </Show>
+  );
+};
+
+// 共通ローディングスピナーコンポーネント
+interface SpinnerProps {
+  size?: "xs" | "sm" | "md" | "lg";
+  color?: "white" | "indigo" | "slate";
+}
+
+const Spinner: Component<SpinnerProps> = (props) => {
+  const sizeClass = () => {
+    switch (props.size) {
+      case "xs": return "h-3 w-3";
+      case "sm": return "h-4 w-4";
+      case "lg": return "h-6 w-6";
+      default: return "h-4 w-4";
+    }
+  };
+  const colorClass = () => {
+    switch (props.color) {
+      case "white": return "border-white border-t-transparent";
+      case "slate": return "border-slate-600 border-t-transparent";
+      default: return "border-indigo-600 border-t-transparent";
+    }
+  };
+  return (
+    <div class={`animate-spin rounded-full border-2 ${sizeClass()} ${colorClass()}`} />
+  );
+};
+
+// スケルトンコンポーネント - ローディング中のプレースホルダー
+interface SkeletonProps {
+  class?: string;
+}
+
+const Skeleton: Component<SkeletonProps> = (props) => (
+  <div class={`animate-pulse rounded bg-slate-200 ${props.class ?? ""}`} />
+);
+
+// 学習カードのスケルトン
+const LearningCardSkeleton: Component = () => (
+  <article class="flex flex-col gap-3 rounded-xl border border-slate-200 bg-slate-50/60 p-4">
+    <div class="flex items-start justify-between gap-2">
+      <div class="space-y-2">
+        <Skeleton class="h-3 w-16" />
+        <Skeleton class="h-6 w-48" />
+        <div class="flex gap-1">
+          <Skeleton class="h-5 w-12 rounded-full" />
+          <Skeleton class="h-5 w-16 rounded-full" />
+        </div>
+      </div>
+      <div class="text-right space-y-1">
+        <Skeleton class="h-3 w-16 ml-auto" />
+        <Skeleton class="h-5 w-24" />
+      </div>
+    </div>
+    <div class="space-y-2">
+      <div class="flex justify-between">
+        <Skeleton class="h-3 w-20" />
+        <Skeleton class="h-3 w-8" />
+      </div>
+      <Skeleton class="h-2 w-full rounded-full" />
+    </div>
+    <div class="flex gap-3">
+      <Skeleton class="h-6 w-14 rounded-md" />
+      <Skeleton class="h-6 w-14 rounded-md" />
+      <Skeleton class="h-6 w-14 rounded-md" />
+    </div>
+    <div class="flex gap-2">
+      <Skeleton class="h-8 w-24 rounded-lg" />
+      <Skeleton class="h-8 w-20 rounded-lg" />
+    </div>
+  </article>
+);
 
 const extractRefId = (match: { id: string; refId?: string }) => {
   if (match.refId && typeof match.refId === "string") return match.refId;
@@ -127,7 +292,7 @@ const LearningListSurface: Component = () => {
   const navigate = useNavigate();
   const toast = useToast();
   const settings = useSettings();
-  const [query, setQuery] = createSignal("");
+  const [query, setQuery, debouncedQuery] = createDebouncedSignal("", 300);
   const [subject, setSubject] = createSignal("all");
   const [newTitle, setNewTitle] = createSignal("");
   const [newSubject, setNewSubject] = createSignal("");
@@ -152,10 +317,7 @@ const LearningListSurface: Component = () => {
       toast.showToast(`バックアップをインポートしました: ${file.name}`, "success");
       refetch();
     } catch (error) {
-      toast.showToast(
-        error instanceof Error ? `インポートに失敗しました: ${error.message}` : "インポートに失敗しました",
-        "error"
-      );
+      toast.showToast(`インポートに失敗しました: ${formatApiError(error)}`, "error");
     } finally {
       input.value = "";
       setIsImporting(false);
@@ -166,7 +328,7 @@ const LearningListSurface: Component = () => {
 
   const [learnings, { refetch }] = createResource(
     () => ({
-      q: query().trim() || undefined,
+      q: debouncedQuery().trim() || undefined,
       subject: subject() === "all" ? undefined : subject(),
     }),
     (params) => fetchLearnings({ ...params, limit: 100 }),
@@ -208,6 +370,7 @@ const LearningListSurface: Component = () => {
   } | null>(null);
   const [isUpdating, setIsUpdating] = createSignal(false);
   const [isDeleting, setIsDeleting] = createSignal<string | null>(null);
+  const [deleteConfirm, setDeleteConfirm] = createSignal<{ id: string; title: string } | null>(null);
 
   const handleEditLearning = (learning: typeof cards extends () => (infer T)[] ? T : never) => {
     setEditingLearning({
@@ -235,31 +398,29 @@ const LearningListSurface: Component = () => {
       setEditingLearning(null);
       refetch();
     } catch (error) {
-      toast.showToast(
-        error instanceof Error ? `更新に失敗しました: ${error.message}` : "更新に失敗しました",
-        "error"
-      );
+      toast.showToast(`更新に失敗しました: ${formatApiError(error)}`, "error");
     } finally {
       setIsUpdating(false);
     }
   };
 
   const handleDeleteLearning = async (id: string, title: string) => {
-    if (!confirm(`「${title}」を削除しますか？\n関連する教材・生成コンテンツ・演習履歴もすべて削除されます。`)) {
-      return;
-    }
-    setIsDeleting(id);
+    setDeleteConfirm({ id, title });
+  };
+
+  const confirmDeleteLearning = async () => {
+    const target = deleteConfirm();
+    if (!target) return;
+    setIsDeleting(target.id);
     try {
-      await deleteLearning(id);
-      toast.showToast(`「${title}」を削除しました`, "success");
+      await deleteLearning(target.id);
+      toast.showToast(`「${target.title}」を削除しました`, "success");
       refetch();
     } catch (error) {
-      toast.showToast(
-        error instanceof Error ? `削除に失敗しました: ${error.message}` : "削除に失敗しました",
-        "error"
-      );
+      toast.showToast(`削除に失敗しました: ${formatApiError(error)}`, "error");
     } finally {
       setIsDeleting(null);
+      setDeleteConfirm(null);
     }
   };
 
@@ -327,21 +488,61 @@ const LearningListSurface: Component = () => {
               class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-indigo-300 focus:outline-none focus:ring-2 focus:ring-indigo-100 md:w-64"
               placeholder="タイトル・タグ検索"
             />
+            <Show when={learnings.loading}>
+              <Spinner size="sm" color="indigo" />
+            </Show>
           </div>
 
           <Show
-            when={cards().length > 0}
+            when={!learnings.loading}
             fallback={
-              <div class="mt-4 rounded-lg border border-dashed border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
-                条件に合致する学習がありません。タイトルやタグを変えて再検索してください。
+              <div class="mt-4 grid gap-3 md:grid-cols-2">
+                <LearningCardSkeleton />
+                <LearningCardSkeleton />
+                <LearningCardSkeleton />
+                <LearningCardSkeleton />
               </div>
             }
           >
-            <div class="mt-4 grid gap-3 md:grid-cols-2">
-              <For each={cards()}>
-                {(learning) => (
-                  <article class="flex flex-col gap-3 rounded-xl border border-slate-200 bg-slate-50/60 p-4">
-                    <div class="flex items-start justify-between gap-2">
+            <Show
+              when={cards().length > 0}
+              fallback={
+                <div class="mt-4 flex flex-col items-center justify-center rounded-xl border-2 border-dashed border-slate-200 bg-slate-50 p-8 text-center">
+                  <Show
+                    when={debouncedQuery().trim() || subject() !== "all"}
+                    fallback={
+                      <>
+                        <svg class="mx-auto h-12 w-12 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+                        </svg>
+                        <p class="mt-3 text-sm font-semibold text-slate-700">学習カードがまだありません</p>
+                        <p class="mt-1 text-xs text-slate-500">右のフォームから最初の学習カードを作成してみましょう</p>
+                      </>
+                    }
+                  >
+                    <svg class="mx-auto h-10 w-10 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+                    </svg>
+                    <p class="mt-2 text-sm text-slate-600">条件に合致する学習がありません</p>
+                    <p class="mt-1 text-xs text-slate-500">検索キーワードや教科を変えて再検索してください</p>
+                    <button
+                      class="mt-3 rounded-md border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-white"
+                      onClick={() => {
+                        setQuery("");
+                        setSubject("all");
+                      }}
+                    >
+                      フィルタをリセット
+                    </button>
+                  </Show>
+                </div>
+              }
+            >
+              <div class="mt-4 grid gap-3 md:grid-cols-2">
+                <For each={cards()}>
+                  {(learning) => (
+                    <article class="flex flex-col gap-3 rounded-xl border border-slate-200 bg-slate-50/60 p-4">
+                      <div class="flex items-start justify-between gap-2">
                       <div>
                         <p class="text-xs font-semibold uppercase text-slate-500">
                           {subjectLabel(learning.subject)}
@@ -429,6 +630,7 @@ const LearningListSurface: Component = () => {
               </For>
             </div>
           </Show>
+        </Show>
         </div>
 
         {/* 編集モーダル */}
@@ -448,12 +650,15 @@ const LearningListSurface: Component = () => {
                   </label>
                   <label class="flex flex-col gap-1">
                     <span class="text-xs font-semibold text-slate-600">教科</span>
-                    <input
+                    <select
                       class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-indigo-300 focus:outline-none focus:ring-2 focus:ring-indigo-100"
                       value={editing().subject}
-                      onInput={(e) => setEditingLearning({ ...editing(), subject: e.currentTarget.value })}
-                      placeholder="math, english など"
-                    />
+                      onChange={(e) => setEditingLearning({ ...editing(), subject: e.currentTarget.value })}
+                    >
+                      <For each={subjectSelectOptions}>
+                        {(option) => <option value={option.id}>{option.label}</option>}
+                      </For>
+                    </select>
                   </label>
                   <label class="flex flex-col gap-1">
                     <span class="text-xs font-semibold text-slate-600">タグ（カンマ区切り）</span>
@@ -495,26 +700,45 @@ const LearningListSurface: Component = () => {
                 <input
                   value={newTitle()}
                   onInput={(e) => {
-                    setNewTitle(e.currentTarget.value);
-                    if (titleError()) setTitleError("");
+                    const value = e.currentTarget.value;
+                    setNewTitle(value);
+                    // 入力中にリアルタイムバリデーション
+                    if (value.trim()) {
+                      setTitleError("");
+                    }
+                  }}
+                  onBlur={(e) => {
+                    // フォーカスが外れた時にバリデーション
+                    if (!e.currentTarget.value.trim()) {
+                      setTitleError("タイトルを入力してください");
+                    }
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && newTitle().trim()) {
+                      e.preventDefault();
+                      createLearningCard();
+                    }
                   }}
                   class={`w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 ${
                     titleError()
-                      ? "border-red-300 focus:border-red-400 focus:ring-red-100"
+                      ? "border-rose-300 focus:border-rose-400 focus:ring-rose-100"
                       : "border-slate-200 focus:border-indigo-300 focus:ring-indigo-100"
                   }`}
                   placeholder="タイトル（必須）"
                 />
                 <Show when={titleError()}>
-                  <p class="mt-1 text-xs text-red-600">{titleError()}</p>
+                  <p class="mt-1 text-xs text-rose-600">{titleError()}</p>
                 </Show>
               </div>
-              <input
+              <select
                 value={newSubject()}
-                onInput={(e) => setNewSubject(e.currentTarget.value)}
-                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-indigo-300 focus:outline-none focus:ring-2 focus:ring-indigo-100"
-                placeholder="教科（math, english など）"
-              />
+                onChange={(e) => setNewSubject(e.currentTarget.value)}
+                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-indigo-300 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+              >
+                <For each={subjectSelectOptions}>
+                  {(option) => <option value={option.id}>{option.label}</option>}
+                </For>
+              </select>
               <input
                 value={newTags()}
                 onInput={(e) => setNewTags(e.currentTarget.value)}
@@ -534,6 +758,16 @@ const LearningListSurface: Component = () => {
           </div>
         </aside>
       </div>
+
+      <ConfirmDialog
+        isOpen={!!deleteConfirm()}
+        title="学習を削除"
+        message={`「${deleteConfirm()?.title ?? ""}」を削除しますか？\n関連する教材・生成コンテンツ・演習履歴もすべて削除されます。`}
+        confirmLabel="削除する"
+        onConfirm={confirmDeleteLearning}
+        onCancel={() => setDeleteConfirm(null)}
+        isLoading={!!isDeleting()}
+      />
     </section>
   );
 };
@@ -577,8 +811,20 @@ const LearningDetailSurface: Component = () => {
   const [isDeletingLearning, setIsDeletingLearning] = createSignal(false);
   // コンテンツ削除用
   const [isDeletingContent, setIsDeletingContent] = createSignal<string | null>(null);
+  // 削除確認ダイアログ用
+  const [deleteLearningConfirm, setDeleteLearningConfirm] = createSignal(false);
+  const [deleteContentConfirm, setDeleteContentConfirm] = createSignal<{ id: string; type: string } | null>(null);
   // 音声生成用
   const [generatingAudioFor, setGeneratingAudioFor] = createSignal<string | null>(null);
+  const [audioGenerationProgress, setAudioGenerationProgress] = createSignal(0); // 0-100
+  const [audioGenerationCancelled, setAudioGenerationCancelled] = createSignal(false);
+
+  const cancelAudioGeneration = () => {
+    setAudioGenerationCancelled(true);
+    setGeneratingAudioFor(null);
+    setAudioGenerationProgress(0);
+    toast.showToast("音声生成をキャンセルしました", "info");
+  };
 
   const [learningList, { refetch: refetchLearningList }] = createResource(() => true, () =>
     fetchLearnings({ limit: 50 }),
@@ -885,51 +1131,50 @@ const LearningDetailSurface: Component = () => {
       setIsEditingLearning(false);
       refetchLearningList();
     } catch (error) {
-      toast.showToast(
-        error instanceof Error ? `更新に失敗しました: ${error.message}` : "更新に失敗しました",
-        "error"
-      );
+      toast.showToast(`更新に失敗しました: ${formatApiError(error)}`, "error");
     } finally {
       setIsUpdatingLearning(false);
     }
   };
 
-  const handleDeleteCurrentLearning = async () => {
+  const handleDeleteCurrentLearning = () => {
+    setDeleteLearningConfirm(true);
+  };
+
+  const confirmDeleteCurrentLearning = async () => {
     const current = learning();
     if (!current) return;
-    if (!confirm(`「${current.title}」を削除しますか？\n関連する教材・生成コンテンツ・演習履歴もすべて削除されます。`)) {
-      return;
-    }
     setIsDeletingLearning(true);
     try {
       await deleteLearning(current.id);
       toast.showToast(`「${current.title}」を削除しました`, "success");
       navigate("/");
     } catch (error) {
-      toast.showToast(
-        error instanceof Error ? `削除に失敗しました: ${error.message}` : "削除に失敗しました",
-        "error"
-      );
+      toast.showToast(`削除に失敗しました: ${formatApiError(error)}`, "error");
     } finally {
       setIsDeletingLearning(false);
+      setDeleteLearningConfirm(false);
     }
   };
 
   // 生成コンテンツ削除ハンドラー
-  const handleDeleteContent = async (contentId: string) => {
-    if (!confirm("この生成コンテンツを削除しますか？")) return;
-    setIsDeletingContent(contentId);
+  const handleDeleteContent = (contentId: string, contentType: string) => {
+    setDeleteContentConfirm({ id: contentId, type: contentType });
+  };
+
+  const confirmDeleteContent = async () => {
+    const target = deleteContentConfirm();
+    if (!target) return;
+    setIsDeletingContent(target.id);
     try {
-      await deleteContent(contentId);
+      await deleteContent(target.id);
       toast.showToast("生成コンテンツを削除しました", "success");
       await refetchContents();
     } catch (error) {
-      toast.showToast(
-        error instanceof Error ? `削除に失敗しました: ${error.message}` : "削除に失敗しました",
-        "error"
-      );
+      toast.showToast(`削除に失敗しました: ${formatApiError(error)}`, "error");
     } finally {
       setIsDeletingContent(null);
+      setDeleteContentConfirm(null);
     }
   };
 
@@ -1169,7 +1414,7 @@ const LearningDetailSurface: Component = () => {
                 disabled={isGenerating() || (materials() ?? []).length === 0}
               >
                 <Show when={isGenerating()}>
-                  <div class="h-4 w-4 animate-spin rounded-full border-2 border-indigo-700 border-t-transparent" />
+                  <Spinner size="sm" color="indigo" />
                 </Show>
                 {isGenerating()
                   ? "生成中..."
@@ -1182,8 +1427,21 @@ const LearningDetailSurface: Component = () => {
             <Show
               when={selectedTabContents().length > 0}
               fallback={
-                <div class="rounded-lg border border-dashed border-slate-200 bg-stone-50 px-4 py-6 text-sm text-slate-700">
-                  まだ生成されたコンテンツがありません。教材の追加後に生成してください。
+                <div class="flex flex-col items-center justify-center rounded-xl border-2 border-dashed border-slate-200 bg-slate-50 p-6 text-center">
+                  <svg class="h-10 w-10 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                  </svg>
+                  <p class="mt-2 text-sm font-semibold text-slate-700">
+                    {generatedTypeLabels[tab()]}がまだありません
+                  </p>
+                  <p class="mt-1 text-xs text-slate-500">
+                    上の「{generatedTypeLabels[tab()]}生成」ボタンで教材から自動生成できます
+                  </p>
+                  <Show when={(materials() ?? []).length === 0}>
+                    <p class="mt-2 text-xs text-amber-600">
+                      ※ 先に教材を追加してください
+                    </p>
+                  </Show>
                 </div>
               }
             >
@@ -1226,29 +1484,42 @@ const LearningDetailSurface: Component = () => {
                                         )
                                           return;
                                         setGeneratingAudioFor(item.id);
+                                        setAudioGenerationProgress(0);
+                                        setAudioGenerationCancelled(false);
                                         toast.showToast("音声生成を開始しました。完了まで数分かかる場合があります...", "info");
                                         try {
                                           await requestTtsGeneration(item.id);
                                           // ポーリングで完了を待つ (最大5分)
+                                          let elapsed = 0;
+                                          const maxTime = 300000; // 5分
                                           const pollInterval = setInterval(async () => {
+                                            if (audioGenerationCancelled()) {
+                                              clearInterval(pollInterval);
+                                              return;
+                                            }
+                                            elapsed += 5000;
+                                            setAudioGenerationProgress(Math.min(95, Math.round((elapsed / maxTime) * 100)));
                                             await refetchContents();
                                             const updated = generatedContents()?.find(c => c.id === item.id);
                                             if ((updated?.content as Record<string, unknown>)?.audioUrl) {
                                               clearInterval(pollInterval);
                                               setGeneratingAudioFor(null);
+                                              setAudioGenerationProgress(100);
                                               toast.showToast("音声の生成が完了しました！", "success");
                                             }
                                           }, 5000);
                                           // 5分後にタイムアウト
                                           setTimeout(() => {
                                             clearInterval(pollInterval);
-                                            if (generatingAudioFor() === item.id) {
+                                            if (generatingAudioFor() === item.id && !audioGenerationCancelled()) {
                                               setGeneratingAudioFor(null);
+                                              setAudioGenerationProgress(0);
                                               toast.showToast("音声生成がタイムアウトしました。ページを更新してください。", "error");
                                             }
-                                          }, 300000);
+                                          }, maxTime);
                                         } catch {
                                           setGeneratingAudioFor(null);
+                                          setAudioGenerationProgress(0);
                                           toast.showToast("音声生成の開始に失敗しました", "error");
                                         }
                                       }}
@@ -1257,12 +1528,30 @@ const LearningDetailSurface: Component = () => {
                                     </button>
                                   }
                                 >
-                                  <div class="flex items-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-2 py-1">
-                                    <svg class="h-3 w-3 animate-spin text-amber-600" fill="none" viewBox="0 0 24 24">
-                                      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
-                                      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                                    </svg>
-                                    <span class="text-xs font-semibold text-amber-700">生成中...</span>
+                                  <div class="flex flex-col gap-1">
+                                    <div class="flex items-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-2 py-1">
+                                      <svg class="h-3 w-3 animate-spin text-amber-600" fill="none" viewBox="0 0 24 24">
+                                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
+                                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                                      </svg>
+                                      <span class="text-xs font-semibold text-amber-700">生成中 {audioGenerationProgress()}%</span>
+                                      <button
+                                        class="ml-1 rounded px-1 text-[10px] font-semibold text-amber-800 hover:bg-amber-100"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          cancelAudioGeneration();
+                                        }}
+                                        title="キャンセル"
+                                      >
+                                        ✕
+                                      </button>
+                                    </div>
+                                    <div class="h-1 w-full overflow-hidden rounded-full bg-amber-100">
+                                      <div
+                                        class="h-1 rounded-full bg-amber-500 transition-all duration-300"
+                                        style={{ width: `${audioGenerationProgress()}%` }}
+                                      />
+                                    </div>
                                   </div>
                                 </Show>
                               }
@@ -1289,28 +1578,41 @@ const LearningDetailSurface: Component = () => {
                                           )
                                             return;
                                           setGeneratingAudioFor(item.id);
+                                          setAudioGenerationProgress(0);
+                                          setAudioGenerationCancelled(false);
                                           toast.showToast("音声を再生成しています...", "info");
                                           try {
                                             await requestTtsGeneration(item.id);
+                                            let elapsed = 0;
+                                            const maxTime = 300000;
                                             const pollInterval = setInterval(async () => {
+                                              if (audioGenerationCancelled()) {
+                                                clearInterval(pollInterval);
+                                                return;
+                                              }
+                                              elapsed += 5000;
+                                              setAudioGenerationProgress(Math.min(95, Math.round((elapsed / maxTime) * 100)));
                                               await refetchContents();
                                               const updated = generatedContents()?.find(c => c.id === item.id);
                                               const currentAudioUrl = (updated?.content as Record<string, unknown>)?.audioUrl;
                                               if (currentAudioUrl && currentAudioUrl !== audioUrl()) {
                                                 clearInterval(pollInterval);
                                                 setGeneratingAudioFor(null);
+                                                setAudioGenerationProgress(100);
                                                 toast.showToast("音声の再生成が完了しました！", "success");
                                               }
                                             }, 5000);
                                             setTimeout(() => {
                                               clearInterval(pollInterval);
-                                              if (generatingAudioFor() === item.id) {
+                                              if (generatingAudioFor() === item.id && !audioGenerationCancelled()) {
                                                 setGeneratingAudioFor(null);
+                                                setAudioGenerationProgress(0);
                                                 toast.showToast("音声再生成がタイムアウトしました。ページを更新してください。", "error");
                                               }
-                                            }, 300000);
+                                            }, maxTime);
                                           } catch {
                                             setGeneratingAudioFor(null);
+                                            setAudioGenerationProgress(0);
                                             toast.showToast("音声再生成の開始に失敗しました", "error");
                                           }
                                         }}
@@ -1324,7 +1626,17 @@ const LearningDetailSurface: Component = () => {
                                         <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
                                         <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
                                       </svg>
-                                      <span>再生成中...</span>
+                                      <span>再生成中 {audioGenerationProgress()}%</span>
+                                      <button
+                                        class="ml-1 rounded px-1 text-[10px] font-semibold hover:bg-amber-100"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          cancelAudioGeneration();
+                                        }}
+                                        title="キャンセル"
+                                      >
+                                        ✕
+                                      </button>
                                     </div>
                                   </Show>
                                 </div>
@@ -1386,7 +1698,7 @@ const LearningDetailSurface: Component = () => {
                           </button>
                           <button
                             class="rounded-md border border-rose-200 px-2 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60"
-                            onClick={() => handleDeleteContent(item.id)}
+                            onClick={() => handleDeleteContent(item.id, item.type)}
                             disabled={isDeletingContent() === item.id}
                           >
                             {isDeletingContent() === item.id ? "削除中..." : "削除"}
@@ -1698,7 +2010,7 @@ const LearningDetailSurface: Component = () => {
               disabled={isIngesting()}
             >
               <Show when={isIngesting()}>
-                <div class="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                <Spinner size="sm" color="white" />
               </Show>
               {isIngesting() ? "保存中..." : "教材を保存"}
             </button>
@@ -1850,12 +2162,15 @@ const LearningDetailSurface: Component = () => {
               </label>
               <label class="flex flex-col gap-1">
                 <span class="text-xs font-semibold text-slate-600">教科</span>
-                <input
+                <select
                   class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-indigo-300 focus:outline-none focus:ring-2 focus:ring-indigo-100"
                   value={editSubject()}
-                  onInput={(e) => setEditSubject(e.currentTarget.value)}
-                  placeholder="math, english など"
-                />
+                  onChange={(e) => setEditSubject(e.currentTarget.value)}
+                >
+                  <For each={subjectSelectOptions}>
+                    {(option) => <option value={option.id}>{option.label}</option>}
+                  </For>
+                </select>
               </label>
               <label class="flex flex-col gap-1">
                 <span class="text-xs font-semibold text-slate-600">タグ（カンマ区切り）</span>
@@ -1885,6 +2200,26 @@ const LearningDetailSurface: Component = () => {
           </div>
         </div>
       </Show>
+
+      <ConfirmDialog
+        isOpen={deleteLearningConfirm()}
+        title="学習を削除"
+        message={`「${learning()?.title ?? ""}」を削除しますか？\n関連する教材・生成コンテンツ・演習履歴もすべて削除されます。`}
+        confirmLabel="削除する"
+        onConfirm={confirmDeleteCurrentLearning}
+        onCancel={() => setDeleteLearningConfirm(false)}
+        isLoading={isDeletingLearning()}
+      />
+
+      <ConfirmDialog
+        isOpen={!!deleteContentConfirm()}
+        title="生成コンテンツを削除"
+        message={`この${generatedTypeLabels[deleteContentConfirm()?.type as GeneratedContentType] ?? "コンテンツ"}を削除しますか？`}
+        confirmLabel="削除する"
+        onConfirm={confirmDeleteContent}
+        onCancel={() => setDeleteContentConfirm(null)}
+        isLoading={!!isDeletingContent()}
+      />
     </section>
     </Show>
   );
@@ -1919,6 +2254,7 @@ const PracticeSurface: Component = () => {
   const [error, setError] = createSignal<string | null>(null);
   const [conversation, setConversation] = createSignal<{ role: "user" | "assistant"; text: string }[]>([]);
   const [suggestedSimilar, setSuggestedSimilar] = createSignal<SimilarQuestion[]>([]);
+  const [isGeneratingSimilar, setIsGeneratingSimilar] = createSignal(false);
 
   const [learnings] = createResource(() => true, () => fetchLearnings({ limit: 50 }));
   createEffect(() => {
@@ -2111,6 +2447,81 @@ const PracticeSurface: Component = () => {
       toast.showToast(errorMsg, "error");
     } finally {
       setIsOcring(false);
+    }
+  };
+
+  const generateSimilarQuestions = async () => {
+    const question = currentQuestion();
+    if (!question) return;
+
+    setIsGeneratingSimilar(true);
+    setError(null);
+
+    try {
+      const prompt = `以下の問題に対して、同じ分野・難易度の類題を3問生成してください。各問題には「問題文」と「ヒント」を含めてください。
+
+【元の問題】
+タイトル: ${question.title}
+問題文: ${question.prompt}
+${question.hint ? `ヒント: ${question.hint}` : ""}
+${question.expected ? `模範解答: ${question.expected}` : ""}
+
+出力形式:
+1. 問題: [問題文] / ヒント: [ヒント]
+2. 問題: [問題文] / ヒント: [ヒント]
+3. 問題: [問題文] / ヒント: [ヒント]`;
+
+      const response = await proxyChat(prompt, { topK: 1 });
+      const reply = response.reply;
+
+      // AIの返答から問題を抽出
+      const lines = reply.split("\n").filter((line) => line.trim());
+      const newQuestions: SimilarQuestion[] = [];
+
+      for (const line of lines) {
+        const match = line.match(/^\d+\.\s*問題[:：]?\s*(.+?)(?:\s*[/|]\s*ヒント[:：]?\s*(.+))?$/);
+        if (match) {
+          newQuestions.push({
+            prompt: match[1].trim(),
+            hint: match[2]?.trim(),
+          });
+        }
+      }
+
+      // パース失敗時はシンプルな分割を試みる
+      if (newQuestions.length === 0 && reply.includes("問題")) {
+        const simpleMatches = reply.match(/問題[:：]?\s*([^ヒント]+?)(?:ヒント[:：]?\s*([^\n問題]+))?/g);
+        if (simpleMatches) {
+          for (const match of simpleMatches) {
+            const parts = match.split(/ヒント[:：]?\s*/);
+            const promptPart = parts[0].replace(/問題[:：]?\s*/, "").trim();
+            if (promptPart) {
+              newQuestions.push({
+                prompt: promptPart,
+                hint: parts[1]?.trim(),
+              });
+            }
+          }
+        }
+      }
+
+      if (newQuestions.length > 0) {
+        setSuggestedSimilar((prev) => [...prev, ...newQuestions.slice(0, 3)]);
+        toast.showToast(`${newQuestions.length}問の類題を生成しました`, "success");
+      } else {
+        // パースできなかった場合は返答全体を1つの問題として追加
+        setSuggestedSimilar((prev) => [
+          ...prev,
+          { prompt: reply.slice(0, 500), hint: "AI生成の類題提案" },
+        ]);
+        toast.showToast("類題を生成しました", "success");
+      }
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : "類題の生成に失敗しました";
+      setError(errorMsg);
+      toast.showToast(errorMsg, "error");
+    } finally {
+      setIsGeneratingSimilar(false);
     }
   };
 
@@ -2486,7 +2897,7 @@ const PracticeSurface: Component = () => {
                     <p class="text-xs font-semibold text-slate-700">手書き画像を取り込む (OCR)</p>
                     <Show when={isOcring()}>
                       <div class="flex items-center gap-2">
-                        <div class="h-4 w-4 animate-spin rounded-full border-2 border-indigo-600 border-t-transparent" />
+                        <Spinner size="sm" color="indigo" />
                         <span class="text-[11px] text-indigo-600">OCR処理中...</span>
                       </div>
                     </Show>
@@ -2559,10 +2970,16 @@ const PracticeSurface: Component = () => {
                 placeholder={
                   mode() === "handwriting"
                     ? "紙に解いた内容を貼り付けるか、OCR結果を確認して編集してください。"
-                    : "回答を直接入力してください。キーワードを簡潔に含めてください。"
+                    : "回答を直接入力してください。（Ctrl+Enterで送信）"
                 }
                 value={answer()}
                 onInput={(e) => setAnswer(e.currentTarget.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && e.ctrlKey && answer().trim() && !isSubmitting()) {
+                    e.preventDefault();
+                    handleSubmit();
+                  }
+                }}
               />
               <div class="flex flex-wrap gap-2 text-xs text-slate-600">
                 <button
@@ -2571,7 +2988,7 @@ const PracticeSurface: Component = () => {
                   disabled={isSubmitting() || !answer().trim()}
                 >
                   <Show when={isSubmitting()}>
-                    <div class="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                    <Spinner size="sm" color="white" />
                   </Show>
                   {isSubmitting() ? "採点中..." : "AI採点して送信"}
                 </button>
@@ -2662,23 +3079,61 @@ const PracticeSurface: Component = () => {
             </div>
 
             <div class="space-y-2">
-              <p class="text-xs font-semibold uppercase text-slate-500">
-                類題 / 次の練習
-              </p>
+              <div class="flex items-center justify-between">
+                <p class="text-xs font-semibold uppercase text-slate-500">
+                  類題 / 次の練習
+                </p>
+                <button
+                  class="flex items-center gap-1 rounded-md border border-indigo-200 bg-indigo-50 px-2 py-1 text-[11px] font-semibold text-indigo-700 transition hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-60"
+                  onClick={generateSimilarQuestions}
+                  disabled={isGeneratingSimilar() || !currentQuestion()}
+                  title="現在の問題から類題を生成"
+                >
+                  <Show when={isGeneratingSimilar()}>
+                    <Spinner size="xs" color="indigo" />
+                  </Show>
+                  <svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                  </svg>
+                  {isGeneratingSimilar() ? "生成中..." : "類題を生成"}
+                </button>
+              </div>
               <div class="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-800">
                 <Show
                   when={suggestedSimilar().length > 0}
-                  fallback={<p class="text-xs text-slate-600">AIが提案した類題がここに表示されます。</p>}
+                  fallback={
+                    <div class="space-y-2">
+                      <p class="text-xs text-slate-600">AIが提案した類題がここに表示されます。</p>
+                      <p class="text-xs text-slate-500">
+                        「類題を生成」ボタンをクリックすると、現在の問題に基づいた類似問題を自動生成します。
+                      </p>
+                    </div>
+                  }
                 >
                   <div class="space-y-2">
                     <For each={suggestedSimilar()}>
-                      {(item) => (
+                      {(item, index) => (
                         <div class="rounded-md bg-white p-2">
-                          <p class="text-sm font-semibold text-slate-900">{item.prompt}</p>
-                          <p class="text-xs text-slate-600">{item.hint ?? ""}</p>
+                          <div class="flex items-start gap-2">
+                            <span class="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-indigo-100 text-[10px] font-bold text-indigo-700">
+                              {index() + 1}
+                            </span>
+                            <div class="flex-1">
+                              <p class="text-sm font-semibold text-slate-900">{item.prompt}</p>
+                              <Show when={item.hint}>
+                                <p class="mt-1 text-xs text-slate-600">💡 {item.hint}</p>
+                              </Show>
+                            </div>
+                          </div>
                         </div>
                       )}
                     </For>
+                    <button
+                      class="mt-2 w-full rounded-md border border-slate-200 py-1.5 text-xs font-semibold text-slate-600 hover:bg-white"
+                      onClick={() => setSuggestedSimilar([])}
+                    >
+                      クリア
+                    </button>
                   </div>
                 </Show>
               </div>
@@ -2998,9 +3453,15 @@ const ChatSurface: Component = () => {
               <span class="text-xs font-semibold text-slate-600">学習検索クエリ</span>
               <input
                 class="rounded-md border border-slate-200 px-2 py-1"
-                placeholder="例: 二次関数"
+                placeholder="例: 二次関数（Enterで検索）"
                 value={toolSearchQuery()}
                 onInput={(event) => setToolSearchQuery(event.currentTarget.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && toolSearchQuery().trim() && !isToolRunning()) {
+                    event.preventDefault();
+                    runToolCall("search_learnings", { q: toolSearchQuery().trim(), limit: 5 });
+                  }
+                }}
               />
             </label>
             <button
@@ -3027,12 +3488,15 @@ const ChatSurface: Component = () => {
             </label>
             <label class="flex flex-col gap-1">
               <span class="text-xs font-semibold text-slate-600">科目 (任意)</span>
-              <input
-                class="rounded-md border border-slate-200 px-2 py-1"
-                placeholder="math / english など"
+              <select
+                class="rounded-md border border-slate-200 px-2 py-1 text-sm"
                 value={toolNewLearningSubject()}
-                onInput={(event) => setToolNewLearningSubject(event.currentTarget.value)}
-              />
+                onChange={(event) => setToolNewLearningSubject(event.currentTarget.value)}
+              >
+                <For each={subjectSelectOptions}>
+                  {(opt) => <option value={opt.id}>{opt.label}</option>}
+                </For>
+              </select>
             </label>
             <button
               class="w-full rounded-md bg-emerald-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-60"
@@ -3226,8 +3690,14 @@ const ChatSurface: Component = () => {
               <input
                 value={draft()}
                 onInput={(event) => setDraft(event.currentTarget.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.shiftKey && draft().trim() && !isSending()) {
+                    event.preventDefault();
+                    handleSend();
+                  }
+                }}
                 class="flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-indigo-300 focus:outline-none focus:ring-2 focus:ring-indigo-100"
-                placeholder="質問や生成依頼を入力..."
+                placeholder="質問や生成依頼を入力...（Enterで送信）"
               />
               <button
                 class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-70"
@@ -3414,6 +3884,7 @@ const MaterialSettingsSurface: Component = () => {
   const [previewError, setPreviewError] = createSignal<string | null>(null);
   const [pendingDeleteId, setPendingDeleteId] = createSignal<string | null>(null);
   const [pendingOpenId, setPendingOpenId] = createSignal<string | null>(null);
+  const [deleteMaterialConfirm, setDeleteMaterialConfirm] = createSignal<{ id: string; name: string } | null>(null);
   let fileInputRef: HTMLInputElement | undefined;
 
   onMount(async () => {
@@ -3648,32 +4119,36 @@ const MaterialSettingsSurface: Component = () => {
     }
   };
 
-  const handleDeleteMaterial = async (materialId: string) => {
+  const handleDeleteMaterial = (materialId: string) => {
     const material = (materials() ?? []).find((item) => item.id === materialId);
     if (!material) return;
-    if (typeof window !== "undefined" && !window.confirm("この教材ファイルを削除しますか？")) {
-      return;
-    }
-    setPendingDeleteId(materialId);
+    const name = materialDisplayName(material, libraryEntryMap().get(materialId));
+    setDeleteMaterialConfirm({ id: materialId, name });
+  };
+
+  const confirmDeleteMaterial = async () => {
+    const target = deleteMaterialConfirm();
+    if (!target) return;
+    setPendingDeleteId(target.id);
     setToast(null);
     try {
-      await deleteMaterial(materialId);
-      if (selectedMaterialId() === materialId) {
+      await deleteMaterial(target.id);
+      if (selectedMaterialId() === target.id) {
         setSelectedMaterialId(undefined);
       }
       await Promise.all([refetchMaterials(), refetchLibrary()]);
       setToast({
         tone: "info",
-        message: `${materialDisplayName(material, libraryEntryMap().get(materialId))} を削除しました。`,
+        message: `${target.name} を削除しました。`,
       });
     } catch (error) {
       setToast({
         tone: "error",
-        message:
-          error instanceof Error ? `削除に失敗しました: ${error.message}` : "削除に失敗しました。",
+        message: `削除に失敗しました: ${formatApiError(error)}`,
       });
     } finally {
       setPendingDeleteId(null);
+      setDeleteMaterialConfirm(null);
     }
   };
 
@@ -4008,6 +4483,59 @@ const MaterialSettingsSurface: Component = () => {
                       </Match>
                     </Switch>
                   </div>
+                  <Show when={(material().type === "video" || material().type === "audio") && (material().metadata as Record<string, unknown> | undefined)?.subtitles}>
+                    {(subtitles) => {
+                      const srtValue = () => {
+                        const sub = subtitles();
+                        if (typeof sub === "object" && sub !== null && "value" in sub) {
+                          return (sub as { value: string }).value;
+                        }
+                        return typeof sub === "string" ? sub : "";
+                      };
+                      const parseSrt = (srt: string) => {
+                        const blocks = srt.trim().split(/\n\n+/);
+                        return blocks.map((block) => {
+                          const lines = block.split("\n");
+                          const timeLine = lines.find((l) => l.includes("-->"));
+                          const text = lines.filter((l) => !l.match(/^\d+$/) && !l.includes("-->")).join(" ");
+                          let startSeconds = 0;
+                          if (timeLine) {
+                            const match = timeLine.match(/(\d{2}):(\d{2}):(\d{2}),(\d{3})/);
+                            if (match) {
+                              startSeconds = parseInt(match[1]) * 3600 + parseInt(match[2]) * 60 + parseInt(match[3]) + parseInt(match[4]) / 1000;
+                            }
+                          }
+                          return { time: timeLine?.split("-->")[0]?.trim() ?? "", text, startSeconds };
+                        }).filter((entry) => entry.text.trim());
+                      };
+                      const entries = () => parseSrt(srtValue());
+                      return (
+                        <div>
+                          <div class="flex items-center justify-between">
+                            <p class="text-xs font-semibold uppercase text-slate-500">
+                              字幕 / タイムスタンプ
+                            </p>
+                            <span class="rounded-full bg-emerald-50 px-2 py-1 text-[10px] font-semibold text-emerald-700">
+                              {entries().length}セグメント
+                            </span>
+                          </div>
+                          <div class="mt-2 max-h-48 space-y-1 overflow-auto rounded border border-slate-200 bg-slate-50 p-2">
+                            <For each={entries().slice(0, 50)}>
+                              {(entry) => (
+                                <div class="flex gap-2 text-xs">
+                                  <span class="flex-shrink-0 font-mono text-indigo-600">{entry.time || "00:00:00"}</span>
+                                  <span class="text-slate-800">{entry.text}</span>
+                                </div>
+                              )}
+                            </For>
+                            <Show when={entries().length > 50}>
+                              <p class="text-[11px] text-slate-500">...他 {entries().length - 50} セグメント</p>
+                            </Show>
+                          </div>
+                        </div>
+                      );
+                    }}
+                  </Show>
                   <div>
                     <p class="text-xs font-semibold uppercase text-slate-500">
                       抽出テキスト
@@ -4197,13 +4725,23 @@ const MaterialSettingsSurface: Component = () => {
               disabled={isGenerating() || !selectedMaterialId()}
             >
               <Show when={isGenerating()}>
-                <div class="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                <Spinner size="sm" color="white" />
               </Show>
               {isGenerating() ? "生成中..." : "生成を開始"}
             </button>
           </div>
         </div>
       </div>
+
+      <ConfirmDialog
+        isOpen={!!deleteMaterialConfirm()}
+        title="教材を削除"
+        message={`「${deleteMaterialConfirm()?.name ?? ""}」を削除しますか？`}
+        confirmLabel="削除する"
+        onConfirm={confirmDeleteMaterial}
+        onCancel={() => setDeleteMaterialConfirm(null)}
+        isLoading={!!pendingDeleteId()}
+      />
     </section>
   );
 };
