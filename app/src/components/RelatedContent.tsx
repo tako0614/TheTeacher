@@ -1,4 +1,4 @@
-import { Component, For, Show, createEffect, createResource, createSignal } from "solid-js";
+import { For, Show, createEffect, createResource, createSignal, type Component } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import { semanticSearch, type SemanticMatch } from "../lib/ai";
 
@@ -32,7 +32,8 @@ const RelatedContent: Component<RelatedContentProps> = (props) => {
   const contentMatches = () => 
     related()?.filter(m => m.refType !== "learning") ?? [];
 
-  const handleLearningClick = (id: string) => {
+  const handleLearningClick = (id: string | undefined) => {
+    if (!id) return;
     if (props.onContentClick) {
       props.onContentClick(id, "learning");
     } else {

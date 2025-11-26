@@ -67,6 +67,11 @@ const stepTemplates: Record<
   IngestSource["kind"] | "fallback",
   IngestJob["steps"]
 > = {
+  text: [
+     { id: "chunk", label: "チャンク生成", kind: "chunking", status: "pending" },
+     { id: "embed", label: "埋め込み", kind: "embedding", status: "pending" },
+     { id: "meta", label: "メタデータ", kind: "metadata", status: "pending" },
+  ],
   pdf: [
     {
       id: "download",

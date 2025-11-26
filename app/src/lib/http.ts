@@ -47,21 +47,17 @@ export const requestJson = async <T>(config: RequestConfig): Promise<T> => {
   const body = config.body ? JSON.stringify(config.body) : undefined;
 
   if (isTauri()) {
-    const { fetch, ResponseType } = await import("@tauri-apps/plugin-http");
+    const { fetch } = await import("@tauri-apps/plugin-http");
     const response = await fetch(url, {
       method,
       headers,
       body,
-      responseType: ResponseType.JSON,
     });
-    if (response.status >= 400) {
-      throw new Error(
-        `API error ${response.status}: ${
-          typeof response.data === "string" ? response.data : JSON.stringify(response.data)
-        }`,
-      );
+    if (!response.ok) {
+      const text = await response.text().catch(() => response.statusText);
+      throw new Error(`API error ${response.status}: ${text}`);
     }
-    return (response.data as T | null) ?? (null as T);
+    return (await response.json()) as T;
   }
 
   const res = await fetch(url, {

@@ -1,4 +1,4 @@
-import { Component, For, Show, createEffect, createSignal, onMount } from "solid-js";
+import { For, Show, createEffect, createSignal, onMount, type Component } from "solid-js";
 import { type Preset } from "@theteacher/shared";
 import {
   fetchPresets,

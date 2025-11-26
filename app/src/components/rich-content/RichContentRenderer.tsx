@@ -6,9 +6,7 @@ import {
   createMemo,
   createSignal,
   createEffect,
-  onMount,
   type Component,
-  type JSX,
   Match,
   Switch,
 } from "solid-js";
@@ -27,9 +25,9 @@ import type {
 
 import { normalizeRichContentDocument } from "../../lib/rich-content";
 
-type Props = {
+interface Props {
   value: unknown;
-};
+}
 
 const escapeHtml = (unsafe: string) => {
   return unsafe
@@ -80,49 +78,49 @@ const MathSnippet: Component<{ block: RichMathBlock }> = (props) => {
   return (
     <div
       class="overflow-x-auto rounded-md bg-slate-50 px-3 py-2 text-slate-900"
+      // eslint-disable-next-line solid/no-innerhtml
       innerHTML={html()}
     />
   );
 };
 
 const TextContent: Component<{ block: Extract<RichContentBlock, { type: "text" }> }> = (props) => {
-  const variant = props.block.variant ?? "paragraph";
   const html = createMemo(() => renderTextWithMath(props.block.text));
 
-  if (variant === "heading" || variant === "subheading") {
-    return (
-      <div>
-        <p class="text-xs uppercase text-slate-500">
-          {props.block.badge}
-        </p>
+  return (
+    <Switch>
+      <Match when={props.block.variant === "heading" || props.block.variant === "subheading"}>
+        <div>
+          <p class="text-xs uppercase text-slate-500">
+            {props.block.badge}
+          </p>
+          <p
+            class={`font-semibold text-slate-900 ${
+              props.block.variant === "heading" ? "text-base" : "text-sm"
+            }`}
+            // eslint-disable-next-line solid/no-innerhtml
+            innerHTML={html()}
+          />
+        </div>
+      </Match>
+      <Match when={props.block.variant === "quote"}>
+        <blockquote class="border-l-4 border-indigo-200 bg-indigo-50/60 px-3 py-2 text-sm italic text-indigo-900">
+          {props.block.text}
+        </blockquote>
+      </Match>
+      <Match when={props.block.variant === "code"}>
+        <pre class="overflow-x-auto rounded-md bg-slate-900/90 p-3 text-xs text-slate-50">
+          <code>{props.block.text}</code>
+        </pre>
+      </Match>
+      <Match when={true}>
         <p
-          class={`font-semibold text-slate-900 ${
-            variant === "heading" ? "text-base" : "text-sm"
-          }`}
+          class="text-sm leading-relaxed text-slate-800"
+          // eslint-disable-next-line solid/no-innerhtml
           innerHTML={html()}
         />
-      </div>
-    );
-  }
-  if (variant === "quote") {
-    return (
-      <blockquote class="border-l-4 border-indigo-200 bg-indigo-50/60 px-3 py-2 text-sm italic text-indigo-900">
-        {props.block.text}
-      </blockquote>
-    );
-  }
-  if (variant === "code") {
-    return (
-      <pre class="overflow-x-auto rounded-md bg-slate-900/90 p-3 text-xs text-slate-50">
-        <code>{props.block.text}</code>
-      </pre>
-    );
-  }
-  return (
-    <p
-      class="text-sm leading-relaxed text-slate-800"
-      innerHTML={html()}
-    />
+      </Match>
+    </Switch>
   );
 };
 
@@ -312,7 +310,7 @@ const TimelineBlock: Component<{ block: RichTimelineBlock }> = (props) => {
       >
         <div class="flex gap-4 min-w-max pb-4">
            <For each={props.block.events}>
-              {(event, index) => (
+              {(event) => (
                 <div class="relative flex flex-col w-48">
                   <div class="flex items-center mb-2">
                     <div class="h-3 w-3 rounded-full border-2 border-white bg-indigo-500 shadow-sm z-10" />
@@ -338,18 +336,24 @@ const MermaidDiagram: Component<{ content: string }> = (props) => {
   const [svg, setSvg] = createSignal<string>("");
   const [error, setError] = createSignal<string | null>(null);
 
-  createEffect(async () => {
+  createEffect(() => {
+    const content = props.content;
     const id = `mermaid-${Math.random().toString(36).slice(2)}`;
-    try {
-      mermaid.initialize({ startOnLoad: false, theme: 'default' });
-      const { svg: renderedSvg } = await mermaid.render(id, props.content);
-      setSvg(renderedSvg);
-      setError(null);
-    } catch (e) {
-      console.error(e);
-      // Mermaid sometimes fails but we don't want to crash the app
-      setError("Failed to render diagram");
-    }
+    
+    const renderMermaid = async () => {
+      try {
+        mermaid.initialize({ startOnLoad: false, theme: 'default' });
+        const { svg: renderedSvg } = await mermaid.render(id, content);
+        setSvg(renderedSvg);
+        setError(null);
+      } catch (e) {
+        console.error(e);
+        // Mermaid sometimes fails but we don't want to crash the app
+        setError("Failed to render diagram");
+      }
+    };
+    
+    void renderMermaid();
   });
 
   return (
@@ -357,18 +361,19 @@ const MermaidDiagram: Component<{ content: string }> = (props) => {
       <Show when={error()}>
         <p class="text-red-500 text-sm">{error()}</p>
       </Show>
+      {/* eslint-disable-next-line solid/no-innerhtml */}
       <div innerHTML={svg()} />
     </div>
   );
 };
 
-type DiagramNodePosition = {
+interface DiagramNodePosition {
   id: string;
   label: string;
   description?: string;
   x: number;
   y: number;
-};
+}
 
 const SimpleDiagram: Component<{ block: RichDiagramBlock }> = (props) => {
   const nodes = () => props.block.nodes || [];
@@ -489,6 +494,7 @@ const DiagramBlock: Component<{ block: RichDiagramBlock }> = (props) => {
           <MermaidDiagram content={props.block.content!} />
         </Match>
         <Match when={props.block.format === "svg" && props.block.content}>
+          {/* eslint-disable-next-line solid/no-innerhtml */}
           <div class="w-full overflow-x-auto" innerHTML={props.block.content!} />
         </Match>
       </Switch>
@@ -498,7 +504,7 @@ const DiagramBlock: Component<{ block: RichDiagramBlock }> = (props) => {
 
 const JsonViewer: Component<{ data: StructuredValue; level?: number }> = (props) => {
   const [isExpanded, setIsExpanded] = createSignal(true);
-  const level = props.level ?? 0;
+  const level = () => props.level ?? 0;
   
   const isObject = () => typeof props.data === 'object' && props.data !== null;
   const isArray = () => Array.isArray(props.data);
@@ -528,9 +534,9 @@ const JsonViewer: Component<{ data: StructuredValue; level?: number }> = (props)
                  <div class="pl-4 border-l border-slate-100">
                     <Show when={isArray()}>
                       <For each={props.data as StructuredValue[]}>
-                         {(item, index) => (
+                         {(item) => (
                             <div class="my-0.5">
-                              <JsonViewer data={item} level={level + 1} />
+                              <JsonViewer data={item} level={level() + 1} />
                               <span class="text-slate-400">,</span>
                             </div>
                          )}
@@ -541,7 +547,7 @@ const JsonViewer: Component<{ data: StructuredValue; level?: number }> = (props)
                         {([key, val]) => (
                            <div class="flex my-0.5">
                              <span class="text-indigo-600 mr-2">"{key}":</span>
-                             <JsonViewer data={val} level={level + 1} />
+                             <JsonViewer data={val} level={level() + 1} />
                              <span class="text-slate-400">,</span>
                            </div>
                         )}
@@ -662,6 +668,16 @@ const RichContentRenderer: Component<Props> = (props) => {
       )}
     </Show>
   );
+};
+
+/**
+ * Renders text with inline/block math expressions.
+ * Uses KaTeX for math rendering and escapes all other text for safety.
+ */
+export const MathText: Component<{ text: string; class?: string }> = (props) => {
+  const html = createMemo(() => renderTextWithMath(props.text));
+  // eslint-disable-next-line solid/no-innerhtml -- renderTextWithMath escapes user input and only renders safe KaTeX output
+  return <span class={props.class} innerHTML={html()} />;
 };
 
 export default RichContentRenderer;

@@ -23,14 +23,13 @@ import {
   type PracticeFeedback,
   type PracticeMode,
   type SimilarQuestion,
-  type Preset,
 } from "@theteacher/shared";
 
 import {
   materialIngestPresets,
   resolveLibraryConfig,
 } from "../lib/materials";
-import RichContentRenderer, { renderTextWithMath } from "../components/rich-content/RichContentRenderer";
+import RichContentRenderer, { MathText } from "../components/rich-content/RichContentRenderer";
 import { getRichContentPreview } from "../lib/rich-content";
 
 import {
@@ -57,12 +56,8 @@ import {
   fetchLearning,
   fetchMaterialLibrary,
   fetchMaterials,
-  fetchPresets,
   fetchSessions,
   fetchSnapshot,
-  createPreset,
-  updatePreset,
-  deletePreset as deletePresetApi,
   replaceSnapshot,
   requestTtsGeneration,
   type SnapshotPayload,
@@ -1545,7 +1540,7 @@ const PracticeSurface: Component = () => {
     const appendAssistantTurn = (feedback: PracticeFeedback) => {
       const parts = [feedback.comment, feedback.reasoning, feedback.nextAction].filter(Boolean);
       setConversation((log) =>
-        [...log, userTurn, { role: "assistant", text: parts.join("\n") }].slice(-10),
+        [...log, userTurn, { role: "assistant" as const, text: parts.join("\n") }].slice(-10),
       );
     };
 
@@ -2465,10 +2460,7 @@ const ChatSurface: Component = () => {
                     <span class="text-xs font-semibold uppercase">
                       {msg.role === "assistant" ? "AI" : "You"}
                     </span>
-                    <p
-                      class="mt-1"
-                      innerHTML={renderTextWithMath(msg.content)}
-                    />
+                    <MathText text={msg.content} class="mt-1 block" />
                   </div>
                 )}
               </For>

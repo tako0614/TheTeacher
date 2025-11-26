@@ -9,10 +9,10 @@ import type {
   UpdateUserProfileRequest,
   User,
   UserSession,
-  type GenerateFromMaterialRequest,
-  type GenerationResult,
-  type MaterialIngestRequest,
-  type MaterialIngestResult,
+  GenerateFromMaterialRequest,
+  GenerationResult,
+  MaterialIngestRequest,
+  MaterialIngestResult,
 } from "@theteacher/shared";
 
 import { persistSessionToken } from "./auth";
