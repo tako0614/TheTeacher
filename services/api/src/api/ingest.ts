@@ -19,8 +19,10 @@ import {
   chunkMaterialText,
   type MaterialChunkRecord,
 } from "./embeddings";
-import { transcribeWithOpenAi, visionOcrWithOpenAi, type DataUrlPayload } from "./openai";
-import { countTokens, summarizeText } from "./utils";
+import { performOcr } from "./ocr";
+import { type DataUrlPayload } from "./openai";
+import { performTranscription } from "./transcription";
+import { countTokens, encodeDataUrlFromBytes, summarizeText } from "./utils";
 
 export interface LibraryAssetPayload {
   bytes: Uint8Array;
@@ -301,39 +303,16 @@ const processIngestQueueItem = async (item: IngestQueueItem & { deferred: Deferr
           };
           return;
         }
-        if (preferOffline) {
-          throw new Error("ocr_pdf_empty");
-        }
-        const dataUrl = encodeDataUrlFromBytes(asset.bytes, asset.mimeType);
-        const { text: visionText, model } = await visionOcrWithOpenAi(item.env, dataUrl);
-        if (!visionText) {
-          throw new Error("ocr_pdf_empty");
-        }
-        state.text = visionText;
-        ocrDetails = {
-          engine: job.preferredOcrEngine ?? "openai_vision",
-          model,
-        };
-        return;
+        // Fallback to vision/ocr if PDF text extraction fails (scanned PDF)
       }
-      if (preferOffline) {
-        state.text = summarizeText(
-          `[image_offline_ocr] ${asset.fileName ?? job.source.path ?? "image"}`,
-        );
-        ocrDetails = {
-          engine: job.preferredOcrEngine ?? "native_tesseract",
-        };
-        return;
-      }
-      const dataUrl = encodeDataUrlFromBytes(asset.bytes, asset.mimeType);
-      const { text, model } = await visionOcrWithOpenAi(item.env, dataUrl);
-      if (!text) {
-        throw new Error("ocr_result_empty");
-      }
-      state.text = text;
+
+      const result = await performOcr(item.env, asset.bytes, asset.mimeType);
+
+      state.text = result.text;
       ocrDetails = {
-        engine: job.preferredOcrEngine ?? "openai_vision",
-        model,
+        engine: result.engine,
+        model: result.model,
+        confidence: result.confidence,
       };
     },
     transcription: async () => {
@@ -342,37 +321,29 @@ const processIngestQueueItem = async (item: IngestQueueItem & { deferred: Deferr
       if (!asset) {
         throw new Error("transcription_asset_missing");
       }
-      const transcriptionEngine = preferOffline
-        ? job.preferredTranscriptionEngine ?? "whisper_rs"
-        : "openai_whisper";
-      if (preferOffline) {
-        state.text = summarizeText(
-          `[transcription_pending_offline] ${asset.fileName ?? job.source.path ?? "audio"}`,
-        );
-        transcriptionDetails = {
-          engine: transcriptionEngine,
-        };
-        return;
-      }
-      const payload = {
-        mimeType: asset.mimeType,
-        bytes: asset.bytes,
-        size: asset.bytes.byteLength,
-      };
+
       const includeSegments = job.source.kind === "video";
-      const { text, model, subtitleSrt } = await transcribeWithOpenAi(item.env, payload, {
-        fileName: asset.fileName,
-        includeSegments,
-      });
-      if (!text) {
-        throw new Error("transcription_empty");
-      }
-      state.text = text;
+      const result = await performTranscription(
+        item.env,
+        {
+          mimeType: asset.mimeType,
+          bytes: asset.bytes,
+          size: asset.bytes.byteLength,
+        },
+        {
+          fileName: asset.fileName,
+          includeSegments,
+          preferredEngine: job.preferredTranscriptionEngine,
+          preferOffline,
+        },
+      );
+
+      state.text = result.text;
       transcriptionDetails = {
-        engine: transcriptionEngine,
-        model,
-        subtitleSrt,
-        subtitles: subtitleSrt ? { format: "srt", value: subtitleSrt } : undefined,
+        engine: result.engine,
+        model: result.model,
+        subtitleSrt: result.subtitleSrt,
+        subtitles: result.subtitles,
       };
     },
     metadata: async () => {
@@ -538,26 +509,6 @@ export const fetchRemoteBinary = async (
   };
 };
 
-export const encodeBase64 = (bytes: Uint8Array) => {
-  if (typeof btoa === "function") {
-    let binary = "";
-    bytes.forEach((byte) => {
-      binary += String.fromCharCode(byte);
-    });
-    return btoa(binary);
-  }
-  const buffer = (globalThis as {
-    Buffer?: { from(input: Uint8Array): { toString(encoding: string): string } };
-  }).Buffer;
-  if (buffer) {
-    return buffer.from(bytes).toString("base64");
-  }
-  throw new Error("base64 encoding is not supported in this environment");
-};
-
-export const encodeDataUrlFromBytes = (bytes: Uint8Array, mimeType: string) =>
-  `data:${mimeType || "application/octet-stream"};base64,${encodeBase64(bytes)}`;
-
 type PdfJsLib = typeof PdfJs;
 let pdfjsLibPromise: Promise<PdfJsLib> | null = null;
 
@@ -685,6 +636,8 @@ export const extractMaterialFromSource = async (
     const payloadData = payload!;
     if (source.kind === "audio" || source.kind === "video") {
       if (preferOffline) {
+        // Only minimal placeholder for synchronous offline/preview request if strictly required,
+        // but we can try local OCR if feasible. For now, keep the placeholder logic simple for speed.
         const placeholder = `[transcription_pending_offline] ${payloadData.fileName ?? source.path ?? "media"}`;
         const preview = summarizeText(placeholder);
         return {
@@ -705,16 +658,18 @@ export const extractMaterialFromSource = async (
       }
       const decoded = decodeDataUrl(dataUrl);
       const includeSegments = source.kind === "video";
-      const { text, model, subtitleSrt } = await transcribeWithOpenAi(env, decoded, {
+      
+      const result = await performTranscription(env, decoded, {
         fileName: payloadData.fileName,
         includeSegments,
       });
-      const preview = summarizeText(text);
+
+      const preview = summarizeText(result.text);
       return {
-        rawContent: text,
+        rawContent: result.text,
         extracted: {
           preview,
-          tokens: countTokens(text),
+          tokens: countTokens(result.text),
           format: "transcript" as const,
         },
         metadata: {
@@ -722,9 +677,9 @@ export const extractMaterialFromSource = async (
           payloadFileName: payloadData.fileName,
           payloadBytes: payloadData.bytes ?? decoded.size,
           payloadMimeType: payloadData.mimeType ?? decoded.mimeType,
-          openAiModel: model,
+          openAiModel: result.model,
           payloadDataUrlPreview: dataUrl.slice(0, 120),
-          subtitles: subtitleSrt ? { format: "srt", value: subtitleSrt } : undefined,
+          subtitles: result.subtitles,
         },
       };
     }
@@ -749,13 +704,14 @@ export const extractMaterialFromSource = async (
           },
         };
       }
-      const { text, model } = await visionOcrWithOpenAi(env, dataUrl);
-      const preview = summarizeText(text);
+      const decoded = decodeDataUrl(dataUrl);
+      const result = await performOcr(env, decoded.bytes, decoded.mimeType);
+      const preview = summarizeText(result.text);
       return {
-        rawContent: text,
+        rawContent: result.text,
         extracted: {
           preview,
-          tokens: countTokens(text),
+          tokens: countTokens(result.text),
           format: "ocr" as const,
         },
         metadata: {
@@ -763,7 +719,7 @@ export const extractMaterialFromSource = async (
           payloadFileName: payloadData.fileName,
           payloadBytes: payloadData.bytes,
           payloadMimeType: payloadData.mimeType,
-          openAiModel: model,
+          openAiModel: result.model,
           payloadDataUrlPreview: dataUrl.slice(0, 120),
         },
       };
@@ -788,16 +744,18 @@ export const extractMaterialFromSource = async (
     if (isHttpUrl(source.path)) {
       const remotePayload = await fetchRemoteBinary(source.path);
       const includeSegments = source.kind === "video";
-      const { text, model, subtitleSrt } = await transcribeWithOpenAi(env, remotePayload, {
+      
+      const result = await performTranscription(env, remotePayload, {
         fileName: payload?.fileName ?? source.path.split("/").pop(),
         includeSegments,
       });
-      const preview = summarizeText(text);
+
+      const preview = summarizeText(result.text);
       return {
-        rawContent: text,
+        rawContent: result.text,
         extracted: {
           preview,
-          tokens: countTokens(text),
+          tokens: countTokens(result.text),
           format: "transcript" as const,
         },
         metadata: {
@@ -805,8 +763,8 @@ export const extractMaterialFromSource = async (
           payloadFileName: payload?.fileName ?? source.path,
           payloadBytes: remotePayload.size,
           payloadMimeType: remotePayload.mimeType,
-          openAiModel: model,
-          subtitles: subtitleSrt ? { format: "srt", value: subtitleSrt } : undefined,
+          openAiModel: result.model,
+          subtitles: result.subtitles,
         },
       };
     }

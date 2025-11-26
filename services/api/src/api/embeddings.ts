@@ -15,15 +15,49 @@ export const chunkMaterialText = (
   text: string,
   options: { targetTokens?: number; maxTokens?: number } = {},
 ): MaterialChunkRecord[] => {
-  const targetTokens = options.targetTokens ?? 180;
-  const maxTokens = options.maxTokens ?? 260;
+  const targetTokens = options.targetTokens ?? 240; // Increased slightly for Markdown
+  const maxTokens = options.maxTokens ?? 480;
   const normalized = text.replace(/\r\n/g, "\n").replace(/\t+/g, " ").trim();
   if (!normalized) return [];
 
+  // Markdown Header-aware splitting
+  // Split by headers (#, ##, ###) but keep the delimiter to attach it to the following content
+  // Also split by double newlines to respect paragraphs
+  const headerRegex = /(^|\n)(#{1,6}\s+[^\n]+)/;
   const segments = normalized
-    .split(/(?<=[。．.!?！？])\s+|\n{2,}/)
-    .map((segment) => segment.trim())
-    .filter(Boolean);
+    .split(headerRegex)
+    .reduce((acc, curr, index, array) => {
+      // Re-attach header delimiter if it was split
+      // split with capture group returns [pre, capture, post, ...]
+      // We want to merge capture (header) with the following text block
+      if (curr.trim() === "") return acc;
+      
+      // If current segment matches header pattern (it was the capture group)
+      if (/^[\n]?(#{1,6}\s+[^\n]+)/.test(curr)) {
+         acc.push(curr.trim());
+      } else {
+         // It's a body content
+         // Check if the previous item in acc was a header
+         const prev = acc[acc.length - 1];
+         if (prev && /^#{1,6}\s+[^\n]+$/.test(prev)) {
+             // Merge with previous header
+             acc[acc.length - 1] = prev + "\n\n" + curr.trim();
+         } else {
+             // Just a loose paragraph (or start of file without header)
+             // Further split purely by paragraphs if it's too long? 
+             // For now, just push it.
+             acc.push(curr.trim());
+         }
+      }
+      return acc;
+    }, [] as string[])
+    // Further split very long segments by double newlines if they exceed token limits (simplified)
+    .flatMap(seg => {
+        if (countTokens(seg) > maxTokens) {
+            return seg.split(/\n{2,}/).map(s => s.trim()).filter(Boolean);
+        }
+        return [seg];
+    });
 
   const chunks: MaterialChunkRecord[] = [];
   let buffer = "";
@@ -43,15 +77,14 @@ export const chunkMaterialText = (
     bufferTokens = 0;
   };
 
-  const sourceSegments = segments.length > 0 ? segments : [normalized];
-
-  for (const segment of sourceSegments) {
+  for (const segment of segments) {
     const segmentTokens = countTokens(segment);
-    const tentative = buffer ? `${buffer}\n${segment}` : segment;
+    const tentative = buffer ? `${buffer}\n\n${segment}` : segment;
     const tentativeTokens = bufferTokens + segmentTokens;
 
     if (buffer && tentativeTokens > maxTokens) {
       pushChunk();
+      // If the single segment itself is huge, we have to push it alone (it was already split by para above if possible)
       buffer = segment;
       bufferTokens = segmentTokens;
       continue;

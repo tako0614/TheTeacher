@@ -59,6 +59,7 @@ export const richListBlockSchema = z.object({
         title: z.string().optional(),
         body: z.string().optional(),
         math: z.string().optional(),
+        audioUrl: z.string().optional(),
       }),
     ]),
   ),
@@ -67,6 +68,7 @@ export const richListBlockSchema = z.object({
 export const richTimelineBlockSchema = z.object({
   type: z.literal("timeline"),
   title: z.string().optional(),
+  layout: z.enum(["vertical", "horizontal"]).default("vertical"),
   events: z.array(
     z.object({
       label: z.string(),
@@ -82,6 +84,8 @@ export const richDiagramBlockSchema = z.object({
   title: z.string().optional(),
   description: z.string().optional(),
   layout: z.enum(["horizontal", "vertical"]).default("horizontal"),
+  format: z.enum(["simple", "mermaid", "svg"]).default("simple"),
+  content: z.string().optional(),
   nodes: z
     .array(
       z.object({
@@ -90,7 +94,7 @@ export const richDiagramBlockSchema = z.object({
         description: z.string().optional(),
       }),
     )
-    .min(1),
+    .optional(),
   edges: z
     .array(
       z.object({

@@ -30,7 +30,7 @@ import {
   materialIngestPresets,
   resolveLibraryConfig,
 } from "../lib/materials";
-import RichContentRenderer from "../components/rich-content/RichContentRenderer";
+import RichContentRenderer, { renderTextWithMath } from "../components/rich-content/RichContentRenderer";
 import { getRichContentPreview } from "../lib/rich-content";
 
 import {
@@ -64,6 +64,7 @@ import {
   updatePreset,
   deletePreset as deletePresetApi,
   replaceSnapshot,
+  requestTtsGeneration,
   type SnapshotPayload,
 } from "../lib/api-client";
 import { buildBackupSnapshot, downloadSnapshot, parseSnapshotFile } from "../lib/backup";
@@ -850,7 +851,24 @@ const LearningDetailSurface: Component = () => {
                         <p class="text-xs text-slate-500">
                           {formatDateTime(item.createdAt)}
                         </p>
-                        <div class="mt-2 flex gap-2">
+                        <div class="mt-2 flex justify-end gap-2">
+                          <Show when={item.type === "podcast_script"}>
+                            <button
+                              class="rounded-md border border-indigo-200 bg-indigo-50 px-2 py-1 text-xs font-semibold text-indigo-700 hover:bg-indigo-100"
+                              onClick={async () => {
+                                if (
+                                  !confirm(
+                                    "音声を生成しますか？ (数分かかる場合があります)",
+                                  )
+                                )
+                                  return;
+                                await requestTtsGeneration(item.id);
+                                setTimeout(refetchContents, 2000);
+                              }}
+                            >
+                              音声生成
+                            </button>
+                          </Show>
                           <button class="rounded-md border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-white">
                             詳細
                           </button>
@@ -2447,7 +2465,10 @@ const ChatSurface: Component = () => {
                     <span class="text-xs font-semibold uppercase">
                       {msg.role === "assistant" ? "AI" : "You"}
                     </span>
-                    <p class="mt-1">{msg.content}</p>
+                    <p
+                      class="mt-1"
+                      innerHTML={renderTextWithMath(msg.content)}
+                    />
                   </div>
                 )}
               </For>

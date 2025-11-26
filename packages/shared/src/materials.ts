@@ -3,7 +3,7 @@ import { z } from "zod";
 import { isoDateTimeString, materialSchema, materialTypeSchema } from "./domain";
 
 export const ocrEngineSchema = z.enum([
-  "native_tesseract",
+  "openai_vision",
   "cloudflare_workers_ai",
 ]);
 

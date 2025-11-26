@@ -124,14 +124,19 @@ export const visionOcrWithOpenAi = async (env: AppBindings | undefined, dataUrl:
       messages: [
         {
           role: "system",
-          content: "You are an OCR assistant. Extract readable text verbatim and reply with plain text.",
+          content:
+            "You are an expert educational content digitizer. Your task is to convert the provided image (textbook page, handwritten note, or slide) into structured Markdown text. \n" +
+            "- Use LaTeX for math equations (e.g., $x^2$) where appropriate. \n" +
+            "- Preserve headings, lists, and emphasis. \n" +
+            "- If the image contains diagrams, charts, or illustrations, provide a brief text description in italics (e.g., *[Diagram showing ...]*) inline with the content. \n" +
+            "- Do not output conversational filler. Output only the digitized content.",
         },
         {
           role: "user",
           content: [
             {
               type: "text",
-              text: "Extract the text from this image. Return only the text content with preserved newlines where appropriate.",
+              text: "Digitize the content of this image into structured Markdown.",
             },
             {
               type: "image_url",
@@ -155,6 +160,39 @@ export const visionOcrWithOpenAi = async (env: AppBindings | undefined, dataUrl:
     throw new Error("OpenAI vision response did not contain any text");
   }
   return { text: content, model };
+};
+
+export const generateSpeechWithOpenAi = async (
+  env: AppBindings | undefined,
+  text: string,
+  voice: "alloy" | "echo" | "fable" | "onyx" | "nova" | "shimmer" = "alloy",
+) => {
+  const apiKey = env?.OPENAI_API_KEY;
+  if (!apiKey) {
+    throw new Error("OPENAI_API_KEY is not configured for TTS");
+  }
+  const model = env?.OPENAI_TTS_MODEL?.trim() || "tts-1";
+
+  const response = await fetch(`${resolveOpenAiBaseUrl(env)}/audio/speech`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model,
+      input: text,
+      voice,
+    }),
+  });
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => response.statusText);
+    throw new Error(`OpenAI TTS failed (${response.status}): ${detail}`);
+  }
+
+  const buffer = await response.arrayBuffer();
+  return { buffer, model };
 };
 
 export const DEFAULT_GENERATION_TEMPERATURE = 0.35;

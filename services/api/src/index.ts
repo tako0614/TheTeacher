@@ -104,6 +104,7 @@ import {
   indexPracticeQuestionSemanticNode,
 } from "./api-core";
 import type { ProxyResponseContext, SemanticMatch } from "./api-core";
+import { enqueueTtsJob } from "./api/tts";
 
 app.get("/health", (c) => {
   return c.json({ status: "ok" });
@@ -183,6 +184,51 @@ app.get("/api/learnings", async (c) => {
 
   const items = await listLearnings(c.env.DB, parsed.data, user.id);
   return c.json({ items, count: items.length });
+});
+
+app.post("/api/tts/generate", async (c) => {
+  const { user } = requireAuth(c);
+  const body = await c.req.json().catch(() => ({}));
+  const { generatedContentId } = body;
+
+  if (!generatedContentId || typeof generatedContentId !== "string") {
+    return c.json(
+      { error: "invalid_request", message: "generatedContentId is required" },
+      400,
+    );
+  }
+
+  const db = c.env.DB;
+  if (!db) return c.json({ error: "db_not_configured" }, 503);
+
+  enqueueTtsJob(
+    {
+      generatedContentId,
+      userId: user.id,
+      env: c.env,
+      db: c.env.DB,
+    },
+    c.executionCtx,
+  );
+
+  return c.json({ status: "queued" });
+});
+
+app.get("/api/files/:key{.+$}", async (c) => {
+  const key = c.req.param("key");
+  const object = await c.env.MATERIALS_BUCKET.get(key);
+
+  if (!object) {
+    return c.json({ error: "not_found" }, 404);
+  }
+
+  const headers = new Headers();
+  object.writeHttpMetadata(headers);
+  headers.set("etag", object.httpEtag);
+
+  return new Response(object.body, {
+    headers,
+  });
 });
 
 app.get("/api/learnings/:id", async (c) => {

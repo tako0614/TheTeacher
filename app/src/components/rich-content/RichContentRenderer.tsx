@@ -1,8 +1,12 @@
 import katex from "katex";
+import mermaid from "mermaid";
 import {
   For,
   Show,
   createMemo,
+  createSignal,
+  createEffect,
+  onMount,
   type Component,
   type JSX,
   Match,
@@ -17,6 +21,7 @@ import type {
   RichMathBlock,
   RichStructuredDataBlock,
   RichTableBlock,
+  RichTimelineBlock,
   StructuredValue,
 } from "@theteacher/shared";
 
@@ -24,6 +29,45 @@ import { normalizeRichContentDocument } from "../../lib/rich-content";
 
 type Props = {
   value: unknown;
+};
+
+const escapeHtml = (unsafe: string) => {
+  return unsafe
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+};
+
+export const renderTextWithMath = (text: string) => {
+  const regex = /(\$\$[\s\S]*?\$\$|\$[\s\S]*?\$)/g;
+  const parts = text.split(regex);
+  return parts
+    .map((part) => {
+      if (part.startsWith("$$") && part.endsWith("$$")) {
+        try {
+          return katex.renderToString(part.slice(2, -2), {
+            displayMode: true,
+            throwOnError: false,
+          });
+        } catch {
+          return escapeHtml(part);
+        }
+      }
+      if (part.startsWith("$") && part.endsWith("$")) {
+        try {
+          return katex.renderToString(part.slice(1, -1), {
+            displayMode: false,
+            throwOnError: false,
+          });
+        } catch {
+          return escapeHtml(part);
+        }
+      }
+      return escapeHtml(part);
+    })
+    .join("");
 };
 
 const MathSnippet: Component<{ block: RichMathBlock }> = (props) => {
@@ -43,6 +87,7 @@ const MathSnippet: Component<{ block: RichMathBlock }> = (props) => {
 
 const TextContent: Component<{ block: Extract<RichContentBlock, { type: "text" }> }> = (props) => {
   const variant = props.block.variant ?? "paragraph";
+  const html = createMemo(() => renderTextWithMath(props.block.text));
 
   if (variant === "heading" || variant === "subheading") {
     return (
@@ -54,9 +99,8 @@ const TextContent: Component<{ block: Extract<RichContentBlock, { type: "text" }
           class={`font-semibold text-slate-900 ${
             variant === "heading" ? "text-base" : "text-sm"
           }`}
-        >
-          {props.block.text}
-        </p>
+          innerHTML={html()}
+        />
       </div>
     );
   }
@@ -74,44 +118,94 @@ const TextContent: Component<{ block: Extract<RichContentBlock, { type: "text" }
       </pre>
     );
   }
-  return <p class="text-sm leading-relaxed text-slate-800">{props.block.text}</p>;
+  return (
+    <p
+      class="text-sm leading-relaxed text-slate-800"
+      innerHTML={html()}
+    />
+  );
 };
 
-const TableBlock: Component<{ block: RichTableBlock }> = (props) => (
-  <div class="overflow-hidden rounded-lg border border-slate-200 bg-white">
-    <table class="w-full border-collapse text-sm">
-      <Show when={props.block.caption}>
-        <caption class="bg-slate-50 px-3 py-2 text-left text-xs font-semibold uppercase text-slate-500">
-          {props.block.caption}
-        </caption>
-      </Show>
-      <Show when={(props.block.headers?.length ?? 0) > 0}>
-        <thead class="bg-slate-50 text-xs uppercase text-slate-500">
-          <tr>
-            <For each={props.block.headers}>
-              {(header) => <th class="px-3 py-2 text-left">{header}</th>}
-            </For>
-          </tr>
-        </thead>
-      </Show>
-      <tbody>
-        <For each={props.block.rows}>
-          {(row) => (
-            <tr class="border-t border-slate-100 text-sm text-slate-800">
-              <For each={row}>
-                {(cell) => (
-                  <td class="px-3 py-2 align-top">
-                    {cell === null ? "—" : String(cell)}
-                  </td>
+const TableBlock: Component<{ block: RichTableBlock }> = (props) => {
+  const [sortConfig, setSortConfig] = createSignal<{ colIndex: number; direction: "asc" | "desc" } | null>(null);
+
+  const handleSort = (index: number) => {
+    const current = sortConfig();
+    if (current?.colIndex === index && current.direction === "asc") {
+      setSortConfig({ colIndex: index, direction: "desc" });
+    } else if (current?.colIndex === index && current.direction === "desc") {
+      setSortConfig(null);
+    } else {
+      setSortConfig({ colIndex: index, direction: "asc" });
+    }
+  };
+
+  const sortedRows = createMemo(() => {
+    const config = sortConfig();
+    if (!config) return props.block.rows;
+
+    const { colIndex, direction } = config;
+    return [...props.block.rows].sort((a, b) => {
+      const valA = a[colIndex];
+      const valB = b[colIndex];
+
+      if (valA === valB) return 0;
+      if (valA === null) return 1;
+      if (valB === null) return -1;
+
+      const comparison = valA < valB ? -1 : 1;
+      return direction === "asc" ? comparison : -comparison;
+    });
+  });
+
+  return (
+    <div class="overflow-hidden rounded-lg border border-slate-200 bg-white">
+      <table class="w-full border-collapse text-sm">
+        <Show when={props.block.caption}>
+          <caption class="bg-slate-50 px-3 py-2 text-left text-xs font-semibold uppercase text-slate-500">
+            {props.block.caption}
+          </caption>
+        </Show>
+        <Show when={(props.block.headers?.length ?? 0) > 0}>
+          <thead class="bg-slate-50 text-xs uppercase text-slate-500">
+            <tr>
+              <For each={props.block.headers}>
+                {(header, index) => (
+                  <th 
+                    class="cursor-pointer px-3 py-2 text-left hover:bg-slate-100 select-none"
+                    onClick={() => handleSort(index())}
+                  >
+                    <div class="flex items-center gap-1">
+                      {header}
+                      <Show when={sortConfig()?.colIndex === index()}>
+                        <span>{sortConfig()?.direction === "asc" ? "↑" : "↓"}</span>
+                      </Show>
+                    </div>
+                  </th>
                 )}
               </For>
             </tr>
-          )}
-        </For>
-      </tbody>
-    </table>
-  </div>
-);
+          </thead>
+        </Show>
+        <tbody>
+          <For each={sortedRows()}>
+            {(row) => (
+              <tr class="border-t border-slate-100 text-sm text-slate-800 hover:bg-slate-50">
+                <For each={row}>
+                  {(cell) => (
+                    <td class="px-3 py-2 align-top">
+                      {cell === null ? "—" : String(cell)}
+                    </td>
+                  )}
+                </For>
+              </tr>
+            )}
+          </For>
+        </tbody>
+      </table>
+    </div>
+  );
+};
 
 const ListItems: Component<{ block: RichListBlock }> = (props) => {
   const asArray = () =>
@@ -138,6 +232,13 @@ const ListItems: Component<{ block: RichListBlock }> = (props) => {
                         }}
                       />
                     </div>
+                  </Show>
+                  <Show when={item.audioUrl}>
+                    <audio
+                      controls
+                      src={item.audioUrl}
+                      class="mt-2 h-8 w-full"
+                    />
                   </Show>
                 </div>
               )}
@@ -178,33 +279,88 @@ const ListItems: Component<{ block: RichListBlock }> = (props) => {
   );
 };
 
-type TimelineBlockData = Extract<RichContentBlock, { type: "timeline" }>;
+const TimelineBlock: Component<{ block: RichTimelineBlock }> = (props) => {
+  const isHorizontal = () => props.block.layout === 'horizontal';
+  
+  return (
+    <div class="w-full overflow-x-auto">
+      <Show when={props.block.title}>
+        <p class="mb-2 text-xs font-semibold uppercase text-slate-500">
+          {props.block.title}
+        </p>
+      </Show>
+      <Show 
+        when={isHorizontal()}
+        fallback={
+          <ol class="mt-2 space-y-3 border-l-2 border-indigo-100 pl-4 text-sm">
+            <For each={props.block.events}>
+              {(event) => (
+                <li class="relative">
+                  <span class="absolute -left-[26px] top-1.5 h-3 w-3 rounded-full border-2 border-white bg-indigo-500 shadow-sm" />
+                  <p class="font-semibold text-slate-900">{event.label}</p>
+                  <Show when={event.date}>
+                    <p class="text-xs uppercase text-slate-500">{event.date}</p>
+                  </Show>
+                  <Show when={event.description}>
+                    <p class="text-slate-600">{event.description}</p>
+                  </Show>
+                </li>
+              )}
+            </For>
+          </ol>
+        }
+      >
+        <div class="flex gap-4 min-w-max pb-4">
+           <For each={props.block.events}>
+              {(event, index) => (
+                <div class="relative flex flex-col w-48">
+                  <div class="flex items-center mb-2">
+                    <div class="h-3 w-3 rounded-full border-2 border-white bg-indigo-500 shadow-sm z-10" />
+                    <div class="h-0.5 w-full bg-indigo-100 -ml-1.5" />
+                  </div>
+                  <p class="font-semibold text-slate-900 text-sm">{event.label}</p>
+                  <Show when={event.date}>
+                    <p class="text-xs uppercase text-slate-500 mt-0.5">{event.date}</p>
+                  </Show>
+                  <Show when={event.description}>
+                    <p class="text-slate-600 text-xs mt-1">{event.description}</p>
+                  </Show>
+                </div>
+              )}
+            </For>
+        </div>
+      </Show>
+    </div>
+  );
+};
 
-const TimelineBlock: Component<{ block: TimelineBlockData }> = (props) => (
-  <div>
-    <Show when={props.block.title}>
-      <p class="text-xs font-semibold uppercase text-slate-500">
-        {props.block.title}
-      </p>
-    </Show>
-    <ol class="mt-2 space-y-3 border-l-2 border-indigo-100 pl-4 text-sm">
-      <For each={props.block.events}>
-        {(event) => (
-          <li class="relative">
-            <span class="absolute -left-[26px] top-1.5 h-3 w-3 rounded-full border-2 border-white bg-indigo-500 shadow-sm" />
-            <p class="font-semibold text-slate-900">{event.label}</p>
-            <Show when={event.date}>
-              <p class="text-xs uppercase text-slate-500">{event.date}</p>
-            </Show>
-            <Show when={event.description}>
-              <p class="text-slate-600">{event.description}</p>
-            </Show>
-          </li>
-        )}
-      </For>
-    </ol>
-  </div>
-);
+const MermaidDiagram: Component<{ content: string }> = (props) => {
+  const [svg, setSvg] = createSignal<string>("");
+  const [error, setError] = createSignal<string | null>(null);
+
+  createEffect(async () => {
+    const id = `mermaid-${Math.random().toString(36).slice(2)}`;
+    try {
+      mermaid.initialize({ startOnLoad: false, theme: 'default' });
+      const { svg: renderedSvg } = await mermaid.render(id, props.content);
+      setSvg(renderedSvg);
+      setError(null);
+    } catch (e) {
+      console.error(e);
+      // Mermaid sometimes fails but we don't want to crash the app
+      setError("Failed to render diagram");
+    }
+  });
+
+  return (
+    <div class="overflow-x-auto bg-white p-4 rounded-lg border border-slate-200 flex justify-center">
+      <Show when={error()}>
+        <p class="text-red-500 text-sm">{error()}</p>
+      </Show>
+      <div innerHTML={svg()} />
+    </div>
+  );
+};
 
 type DiagramNodePosition = {
   id: string;
@@ -214,10 +370,13 @@ type DiagramNodePosition = {
   y: number;
 };
 
-const DiagramBlock: Component<{ block: RichDiagramBlock }> = (props) => {
+const SimpleDiagram: Component<{ block: RichDiagramBlock }> = (props) => {
+  const nodes = () => props.block.nodes || [];
+  const edgesList = () => props.block.edges || [];
+
   const layout = () => props.block.layout ?? "horizontal";
   const positioned = createMemo<DiagramNodePosition[]>(() =>
-    props.block.nodes.map((node, index) => ({
+    nodes().map((node, index) => ({
       ...node,
       x: layout() === "horizontal" ? 80 + index * 160 : 150,
       y: layout() === "horizontal" ? 80 : 40 + index * 120,
@@ -234,7 +393,7 @@ const DiagramBlock: Component<{ block: RichDiagramBlock }> = (props) => {
       : Math.max(positioned().length * 120, 160),
   );
   const edges = createMemo(() =>
-    (props.block.edges ?? [])
+    edgesList()
       .map((edge) => {
         const from = positioned().find((item) => item.id === edge.from);
         const to = positioned().find((item) => item.id === edge.to);
@@ -249,16 +408,7 @@ const DiagramBlock: Component<{ block: RichDiagramBlock }> = (props) => {
   );
 
   return (
-    <div class="rounded-lg border border-slate-200 bg-white p-4">
-      <Show when={props.block.title}>
-        <p class="text-xs font-semibold uppercase text-slate-500">
-          {props.block.title}
-        </p>
-      </Show>
-      <Show when={props.block.description}>
-        <p class="text-sm text-slate-600">{props.block.description}</p>
-      </Show>
-      <svg
+     <svg
         viewBox={`0 0 ${chartWidth()} ${chartHeight()}`}
         class="mt-3 w-full"
       >
@@ -319,52 +469,104 @@ const DiagramBlock: Component<{ block: RichDiagramBlock }> = (props) => {
           )}
         </For>
       </svg>
+  );
+}
+
+const DiagramBlock: Component<{ block: RichDiagramBlock }> = (props) => {
+  return (
+    <div class="rounded-lg border border-slate-200 bg-white p-4">
+      <Show when={props.block.title}>
+        <p class="text-xs font-semibold uppercase text-slate-500 mb-2">
+          {props.block.title}
+        </p>
+      </Show>
+      <Show when={props.block.description}>
+        <p class="text-sm text-slate-600 mb-3">{props.block.description}</p>
+      </Show>
+
+      <Switch fallback={<SimpleDiagram block={props.block} />}>
+        <Match when={props.block.format === "mermaid" && props.block.content}>
+          <MermaidDiagram content={props.block.content!} />
+        </Match>
+        <Match when={props.block.format === "svg" && props.block.content}>
+          <div class="w-full overflow-x-auto" innerHTML={props.block.content!} />
+        </Match>
+      </Switch>
     </div>
   );
 };
 
-const asKeyValueEntries = (
-  data: StructuredValue,
-): Array<[string, StructuredValue]> => {
-  if (data === null) return [["値", data]];
-  if (typeof data !== "object") return [["値", data]];
-  if (Array.isArray(data)) {
-    return data.map((value, index) => [`項目 ${index + 1}`, value]);
-  }
-  return Object.entries(data);
-};
+const JsonViewer: Component<{ data: StructuredValue; level?: number }> = (props) => {
+  const [isExpanded, setIsExpanded] = createSignal(true);
+  const level = props.level ?? 0;
+  
+  const isObject = () => typeof props.data === 'object' && props.data !== null;
+  const isArray = () => Array.isArray(props.data);
 
-const formatStructuredValue = (value: StructuredValue): string => {
-  if (value === null) return "—";
-  if (typeof value === "boolean") return value ? "Yes" : "No";
-  if (typeof value === "object") {
-    if (Array.isArray(value)) {
-      return value.map(formatStructuredValue).join(", ");
-    }
-    return JSON.stringify(value, null, 2);
-  }
-  return String(value);
-};
+  const toggle = (e: MouseEvent) => {
+    e.stopPropagation();
+    setIsExpanded(!isExpanded());
+  };
+
+  return (
+    <div class="font-mono text-xs leading-relaxed">
+       <Show 
+          when={isObject()} 
+          fallback={<span class="text-slate-600">{String(props.data)}</span>}
+        >
+          <div class="flex items-start">
+            <button 
+              onClick={toggle} 
+              class="mr-1 mt-0.5 text-slate-400 hover:text-slate-600"
+            >
+               {isExpanded() ? "▼" : "▶"}
+            </button>
+            
+            <Show when={isExpanded()} fallback={<span class="text-slate-500">{isArray() ? '[...]' : '{...}'}</span>}>
+               <div class="flex flex-col">
+                 <span class="text-slate-500">{isArray() ? '[' : '{'}</span>
+                 <div class="pl-4 border-l border-slate-100">
+                    <Show when={isArray()}>
+                      <For each={props.data as StructuredValue[]}>
+                         {(item, index) => (
+                            <div class="my-0.5">
+                              <JsonViewer data={item} level={level + 1} />
+                              <span class="text-slate-400">,</span>
+                            </div>
+                         )}
+                      </For>
+                    </Show>
+                    <Show when={!isArray()}>
+                      <For each={Object.entries(props.data as Record<string, StructuredValue>)}>
+                        {([key, val]) => (
+                           <div class="flex my-0.5">
+                             <span class="text-indigo-600 mr-2">"{key}":</span>
+                             <JsonViewer data={val} level={level + 1} />
+                             <span class="text-slate-400">,</span>
+                           </div>
+                        )}
+                      </For>
+                    </Show>
+                 </div>
+                 <span class="text-slate-500">{isArray() ? ']' : '}'}</span>
+               </div>
+            </Show>
+          </div>
+       </Show>
+    </div>
+  )
+}
 
 const StructuredDataBlock: Component<{ block: RichStructuredDataBlock }> = (props) => (
   <div class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
     <Show when={props.block.title}>
-      <p class="text-xs font-semibold uppercase text-slate-500">
+      <p class="text-xs font-semibold uppercase text-slate-500 mb-2">
         {props.block.title}
       </p>
     </Show>
-    <dl class="mt-2 grid gap-3 text-sm text-slate-800">
-      <For each={asKeyValueEntries(props.block.data)}>
-        {([key, value]) => (
-          <>
-            <dt class="font-semibold">{key}</dt>
-            <dd class="whitespace-pre-line text-slate-600">
-              {formatStructuredValue(value)}
-            </dd>
-          </>
-        )}
-      </For>
-    </dl>
+    <div class="bg-white rounded border border-slate-100 p-3 overflow-x-auto">
+       <JsonViewer data={props.block.data} />
+    </div>
   </div>
 );
 
@@ -383,7 +585,7 @@ const BlockRenderer: Component<{ block: RichContentBlock }> = (props) => (
       <ListItems block={props.block as RichListBlock} />
     </Match>
     <Match when={props.block.type === "timeline"}>
-      <TimelineBlock block={props.block as TimelineBlockData} />
+      <TimelineBlock block={props.block as RichTimelineBlock} />
     </Match>
     <Match when={props.block.type === "diagram"}>
       <DiagramBlock block={props.block as RichDiagramBlock} />

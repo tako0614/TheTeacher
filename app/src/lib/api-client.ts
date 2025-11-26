@@ -151,6 +151,13 @@ export const createContent = async (
     Partial<Pick<GeneratedContent, "id" | "createdAt">>,
 ) => requestJson<GeneratedContent>({ path: "/api/contents", method: "POST", body: input });
 
+export const requestTtsGeneration = async (generatedContentId: string) =>
+  requestJson<{ status: string }>({
+    path: "/api/tts/generate",
+    method: "POST",
+    body: { generatedContentId },
+  });
+
 export const fetchSessions = async (learningId: string) =>
   requestJson<{ items: PracticeSession[] }>({
     path: `/api/learnings/${learningId}/sessions`,

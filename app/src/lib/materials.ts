@@ -15,21 +15,21 @@ export const materialIngestPresets: Array<{
   {
     id: "pdf",
     label: "PDF / スライド",
-    description: "ページ分割→OCR(Tesseract)→チャンクと埋め込み",
+    description: "ページ分割→OCR(Vision API)→チャンクと埋め込み",
     request: {
       source: { kind: "pdf", path: "" },
-      preferOffline: true,
-      ocrEngine: "native_tesseract",
+      preferOffline: false,
+      ocrEngine: "openai_vision",
     },
   },
   {
     id: "image",
     label: "画像 / スキャン",
-    description: "単一画像をOCRしテキスト化",
+    description: "単一画像をOCR(Vision API)しテキスト化",
     request: {
       source: { kind: "image", path: "" },
-      preferOffline: true,
-      ocrEngine: "native_tesseract",
+      preferOffline: false,
+      ocrEngine: "openai_vision",
     },
   },
   {
