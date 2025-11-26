@@ -49,6 +49,8 @@ import {
   createContent,
   createLearning,
   createMaterial,
+  deleteContent,
+  deleteLearning,
   deleteMaterial,
   generateFromMaterial,
   ingestMaterial,
@@ -63,6 +65,7 @@ import {
   fetchSnapshot,
   replaceSnapshot,
   requestTtsGeneration,
+  updateLearning,
   type SnapshotPayload,
 } from "../lib/api-client";
 import { buildBackupSnapshot, downloadSnapshot, parseSnapshotFile } from "../lib/backup";
@@ -195,6 +198,70 @@ const LearningListSurface: Component = () => {
   };
 
   const openDetail = (id: string) => navigate(`/learning-detail?id=${id}`);
+
+  // 編集モーダル用の状態
+  const [editingLearning, setEditingLearning] = createSignal<{
+    id: string;
+    title: string;
+    subject: string;
+    tags: string;
+  } | null>(null);
+  const [isUpdating, setIsUpdating] = createSignal(false);
+  const [isDeleting, setIsDeleting] = createSignal<string | null>(null);
+
+  const handleEditLearning = (learning: typeof cards extends () => (infer T)[] ? T : never) => {
+    setEditingLearning({
+      id: learning.id,
+      title: learning.title,
+      subject: learning.subject ?? "",
+      tags: (learning.tags ?? []).join(", "),
+    });
+  };
+
+  const handleSaveEdit = async () => {
+    const editing = editingLearning();
+    if (!editing) return;
+    setIsUpdating(true);
+    try {
+      await updateLearning(editing.id, {
+        title: editing.title.trim(),
+        subject: editing.subject.trim() || undefined,
+        tags: editing.tags
+          .split(",")
+          .map((tag) => tag.trim())
+          .filter(Boolean),
+      });
+      toast.showToast("学習を更新しました", "success");
+      setEditingLearning(null);
+      refetch();
+    } catch (error) {
+      toast.showToast(
+        error instanceof Error ? `更新に失敗しました: ${error.message}` : "更新に失敗しました",
+        "error"
+      );
+    } finally {
+      setIsUpdating(false);
+    }
+  };
+
+  const handleDeleteLearning = async (id: string, title: string) => {
+    if (!confirm(`「${title}」を削除しますか？\n関連する教材・生成コンテンツ・演習履歴もすべて削除されます。`)) {
+      return;
+    }
+    setIsDeleting(id);
+    try {
+      await deleteLearning(id);
+      toast.showToast(`「${title}」を削除しました`, "success");
+      refetch();
+    } catch (error) {
+      toast.showToast(
+        error instanceof Error ? `削除に失敗しました: ${error.message}` : "削除に失敗しました",
+        "error"
+      );
+    } finally {
+      setIsDeleting(null);
+    }
+  };
 
   return (
     <section class="space-y-6">
@@ -345,9 +412,16 @@ const LearningListSurface: Component = () => {
                       </button>
                       <button
                         class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-white"
-                        onClick={() => openDetail(learning.id)}
+                        onClick={() => handleEditLearning(learning)}
                       >
-                        生成履歴
+                        編集
+                      </button>
+                      <button
+                        class="rounded-lg border border-rose-200 px-3 py-2 text-xs font-semibold text-rose-700 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60"
+                        onClick={() => handleDeleteLearning(learning.id, learning.title)}
+                        disabled={isDeleting() === learning.id}
+                      >
+                        {isDeleting() === learning.id ? "削除中..." : "削除"}
                       </button>
                     </div>
                   </article>
@@ -356,6 +430,60 @@ const LearningListSurface: Component = () => {
             </div>
           </Show>
         </div>
+
+        {/* 編集モーダル */}
+        <Show when={editingLearning()}>
+          {(editing) => (
+            <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setEditingLearning(null)}>
+              <div class="w-full max-w-md rounded-xl bg-white p-6 shadow-xl" onClick={(e) => e.stopPropagation()}>
+                <h3 class="text-lg font-bold text-slate-900">学習カードを編集</h3>
+                <div class="mt-4 space-y-3">
+                  <label class="flex flex-col gap-1">
+                    <span class="text-xs font-semibold text-slate-600">タイトル</span>
+                    <input
+                      class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-indigo-300 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+                      value={editing().title}
+                      onInput={(e) => setEditingLearning({ ...editing(), title: e.currentTarget.value })}
+                    />
+                  </label>
+                  <label class="flex flex-col gap-1">
+                    <span class="text-xs font-semibold text-slate-600">教科</span>
+                    <input
+                      class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-indigo-300 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+                      value={editing().subject}
+                      onInput={(e) => setEditingLearning({ ...editing(), subject: e.currentTarget.value })}
+                      placeholder="math, english など"
+                    />
+                  </label>
+                  <label class="flex flex-col gap-1">
+                    <span class="text-xs font-semibold text-slate-600">タグ（カンマ区切り）</span>
+                    <input
+                      class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-indigo-300 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+                      value={editing().tags}
+                      onInput={(e) => setEditingLearning({ ...editing(), tags: e.currentTarget.value })}
+                      placeholder="二次関数, 復習"
+                    />
+                  </label>
+                </div>
+                <div class="mt-6 flex justify-end gap-2">
+                  <button
+                    class="rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+                    onClick={() => setEditingLearning(null)}
+                  >
+                    キャンセル
+                  </button>
+                  <button
+                    class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
+                    onClick={handleSaveEdit}
+                    disabled={isUpdating() || !editing().title.trim()}
+                  >
+                    {isUpdating() ? "保存中..." : "保存"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </Show>
 
         <aside class="space-y-3">
           <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
@@ -440,7 +568,19 @@ const LearningDetailSurface: Component = () => {
   const [isGenerating, setIsGenerating] = createSignal(false);
   const [isDraggingOver, setIsDraggingOver] = createSignal(false);
 
-  const [learningList] = createResource(() => true, () =>
+  // 学習カード編集用
+  const [isEditingLearning, setIsEditingLearning] = createSignal(false);
+  const [editTitle, setEditTitle] = createSignal("");
+  const [editSubject, setEditSubject] = createSignal("");
+  const [editTags, setEditTags] = createSignal("");
+  const [isUpdatingLearning, setIsUpdatingLearning] = createSignal(false);
+  const [isDeletingLearning, setIsDeletingLearning] = createSignal(false);
+  // コンテンツ削除用
+  const [isDeletingContent, setIsDeletingContent] = createSignal<string | null>(null);
+  // 音声生成用
+  const [generatingAudioFor, setGeneratingAudioFor] = createSignal<string | null>(null);
+
+  const [learningList, { refetch: refetchLearningList }] = createResource(() => true, () =>
     fetchLearnings({ limit: 50 }),
   );
   const [learning] = createResource(
@@ -718,6 +858,81 @@ const LearningDetailSurface: Component = () => {
     }
   };
 
+  // 学習カード編集ハンドラー
+  const openEditLearning = () => {
+    const current = learning();
+    if (!current) return;
+    setEditTitle(current.title);
+    setEditSubject(current.subject ?? "");
+    setEditTags((current.tags ?? []).join(", "));
+    setIsEditingLearning(true);
+  };
+
+  const handleSaveLearning = async () => {
+    const current = learning();
+    if (!current) return;
+    setIsUpdatingLearning(true);
+    try {
+      await updateLearning(current.id, {
+        title: editTitle().trim(),
+        subject: editSubject().trim() || undefined,
+        tags: editTags()
+          .split(",")
+          .map((tag) => tag.trim())
+          .filter(Boolean),
+      });
+      toast.showToast("学習を更新しました", "success");
+      setIsEditingLearning(false);
+      refetchLearningList();
+    } catch (error) {
+      toast.showToast(
+        error instanceof Error ? `更新に失敗しました: ${error.message}` : "更新に失敗しました",
+        "error"
+      );
+    } finally {
+      setIsUpdatingLearning(false);
+    }
+  };
+
+  const handleDeleteCurrentLearning = async () => {
+    const current = learning();
+    if (!current) return;
+    if (!confirm(`「${current.title}」を削除しますか？\n関連する教材・生成コンテンツ・演習履歴もすべて削除されます。`)) {
+      return;
+    }
+    setIsDeletingLearning(true);
+    try {
+      await deleteLearning(current.id);
+      toast.showToast(`「${current.title}」を削除しました`, "success");
+      navigate("/");
+    } catch (error) {
+      toast.showToast(
+        error instanceof Error ? `削除に失敗しました: ${error.message}` : "削除に失敗しました",
+        "error"
+      );
+    } finally {
+      setIsDeletingLearning(false);
+    }
+  };
+
+  // 生成コンテンツ削除ハンドラー
+  const handleDeleteContent = async (contentId: string) => {
+    if (!confirm("この生成コンテンツを削除しますか？")) return;
+    setIsDeletingContent(contentId);
+    try {
+      await deleteContent(contentId);
+      toast.showToast("生成コンテンツを削除しました", "success");
+      await refetchContents();
+    } catch (error) {
+      toast.showToast(
+        error instanceof Error ? `削除に失敗しました: ${error.message}` : "削除に失敗しました",
+        "error"
+      );
+    } finally {
+      setIsDeletingContent(null);
+    }
+  };
+
   const addGeneratedDraft = async () => {
     const target = learning();
     if (!target) return;
@@ -873,6 +1088,19 @@ const LearningDetailSurface: Component = () => {
             一覧に戻る
           </A>
           <button
+            class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
+            onClick={openEditLearning}
+          >
+            編集
+          </button>
+          <button
+            class="rounded-lg border border-rose-200 px-3 py-2 text-xs font-semibold text-rose-700 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60"
+            onClick={handleDeleteCurrentLearning}
+            disabled={isDeletingLearning()}
+          >
+            {isDeletingLearning() ? "削除中..." : "削除"}
+          </button>
+          <button
             class="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500"
             onClick={() => {
               const id = learning()?.id;
@@ -985,22 +1213,58 @@ const LearningDetailSurface: Component = () => {
                             <Show
                               when={(item.content as Record<string, unknown>)?.audioUrl as string | undefined}
                               fallback={
-                                <button
-                                  class="rounded-md border border-indigo-200 bg-indigo-50 px-2 py-1 text-xs font-semibold text-indigo-700 hover:bg-indigo-100"
-                                  onClick={async () => {
-                                    if (
-                                      !confirm(
-                                        "音声を生成しますか？ (数分かかる場合があります)",
-                                      )
-                                    )
-                                      return;
-                                    toast.showToast("音声生成を開始しました...", "info");
-                                    await requestTtsGeneration(item.id);
-                                    setTimeout(refetchContents, 2000);
-                                  }}
+                                <Show
+                                  when={generatingAudioFor() === item.id}
+                                  fallback={
+                                    <button
+                                      class="rounded-md border border-indigo-200 bg-indigo-50 px-2 py-1 text-xs font-semibold text-indigo-700 hover:bg-indigo-100"
+                                      onClick={async () => {
+                                        if (
+                                          !confirm(
+                                            "音声を生成しますか？ (数分かかる場合があります)",
+                                          )
+                                        )
+                                          return;
+                                        setGeneratingAudioFor(item.id);
+                                        toast.showToast("音声生成を開始しました。完了まで数分かかる場合があります...", "info");
+                                        try {
+                                          await requestTtsGeneration(item.id);
+                                          // ポーリングで完了を待つ (最大5分)
+                                          const pollInterval = setInterval(async () => {
+                                            await refetchContents();
+                                            const updated = generatedContents()?.find(c => c.id === item.id);
+                                            if ((updated?.content as Record<string, unknown>)?.audioUrl) {
+                                              clearInterval(pollInterval);
+                                              setGeneratingAudioFor(null);
+                                              toast.showToast("音声の生成が完了しました！", "success");
+                                            }
+                                          }, 5000);
+                                          // 5分後にタイムアウト
+                                          setTimeout(() => {
+                                            clearInterval(pollInterval);
+                                            if (generatingAudioFor() === item.id) {
+                                              setGeneratingAudioFor(null);
+                                              toast.showToast("音声生成がタイムアウトしました。ページを更新してください。", "error");
+                                            }
+                                          }, 300000);
+                                        } catch {
+                                          setGeneratingAudioFor(null);
+                                          toast.showToast("音声生成の開始に失敗しました", "error");
+                                        }
+                                      }}
+                                    >
+                                      音声生成
+                                    </button>
+                                  }
                                 >
-                                  音声生成
-                                </button>
+                                  <div class="flex items-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-2 py-1">
+                                    <svg class="h-3 w-3 animate-spin text-amber-600" fill="none" viewBox="0 0 24 24">
+                                      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
+                                      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                                    </svg>
+                                    <span class="text-xs font-semibold text-amber-700">生成中...</span>
+                                  </div>
+                                </Show>
                               }
                             >
                               {(audioUrl) => (
@@ -1012,22 +1276,57 @@ const LearningDetailSurface: Component = () => {
                                   >
                                     お使いの環境では音声の再生に対応していません。
                                   </audio>
-                                  <button
-                                    class="rounded-md border border-indigo-200 bg-indigo-50 px-2 py-1 text-xs font-semibold text-indigo-700 hover:bg-indigo-100"
-                                    onClick={async () => {
-                                      if (
-                                        !confirm(
-                                          "音声を再生成しますか？",
-                                        )
-                                      )
-                                        return;
-                                      toast.showToast("音声を再生成しています...", "info");
-                                      await requestTtsGeneration(item.id);
-                                      setTimeout(refetchContents, 2000);
-                                    }}
+                                  <Show
+                                    when={generatingAudioFor() === item.id}
+                                    fallback={
+                                      <button
+                                        class="rounded-md border border-indigo-200 bg-indigo-50 px-2 py-1 text-xs font-semibold text-indigo-700 hover:bg-indigo-100"
+                                        onClick={async () => {
+                                          if (
+                                            !confirm(
+                                              "音声を再生成しますか？",
+                                            )
+                                          )
+                                            return;
+                                          setGeneratingAudioFor(item.id);
+                                          toast.showToast("音声を再生成しています...", "info");
+                                          try {
+                                            await requestTtsGeneration(item.id);
+                                            const pollInterval = setInterval(async () => {
+                                              await refetchContents();
+                                              const updated = generatedContents()?.find(c => c.id === item.id);
+                                              const currentAudioUrl = (updated?.content as Record<string, unknown>)?.audioUrl;
+                                              if (currentAudioUrl && currentAudioUrl !== audioUrl()) {
+                                                clearInterval(pollInterval);
+                                                setGeneratingAudioFor(null);
+                                                toast.showToast("音声の再生成が完了しました！", "success");
+                                              }
+                                            }, 5000);
+                                            setTimeout(() => {
+                                              clearInterval(pollInterval);
+                                              if (generatingAudioFor() === item.id) {
+                                                setGeneratingAudioFor(null);
+                                                toast.showToast("音声再生成がタイムアウトしました。ページを更新してください。", "error");
+                                              }
+                                            }, 300000);
+                                          } catch {
+                                            setGeneratingAudioFor(null);
+                                            toast.showToast("音声再生成の開始に失敗しました", "error");
+                                          }
+                                        }}
+                                      >
+                                        再生成
+                                      </button>
+                                    }
                                   >
-                                    再生成
-                                  </button>
+                                    <div class="flex items-center gap-1 text-xs text-amber-600">
+                                      <svg class="h-3 w-3 animate-spin" fill="none" viewBox="0 0 24 24">
+                                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
+                                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                                      </svg>
+                                      <span>再生成中...</span>
+                                    </div>
+                                  </Show>
                                 </div>
                               )}
                             </Show>
@@ -1084,6 +1383,13 @@ const LearningDetailSurface: Component = () => {
                             }}
                           >
                             再生成
+                          </button>
+                          <button
+                            class="rounded-md border border-rose-200 px-2 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60"
+                            onClick={() => handleDeleteContent(item.id)}
+                            disabled={isDeletingContent() === item.id}
+                          >
+                            {isDeletingContent() === item.id ? "削除中..." : "削除"}
                           </button>
                         </div>
                       </div>
@@ -1527,6 +1833,58 @@ const LearningDetailSurface: Component = () => {
           </div>
         </div>
       </div>
+
+      {/* 学習編集モーダル */}
+      <Show when={isEditingLearning()}>
+        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setIsEditingLearning(false)}>
+          <div class="w-full max-w-md rounded-xl bg-white p-6 shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <h3 class="text-lg font-bold text-slate-900">学習カードを編集</h3>
+            <div class="mt-4 space-y-3">
+              <label class="flex flex-col gap-1">
+                <span class="text-xs font-semibold text-slate-600">タイトル</span>
+                <input
+                  class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-indigo-300 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+                  value={editTitle()}
+                  onInput={(e) => setEditTitle(e.currentTarget.value)}
+                />
+              </label>
+              <label class="flex flex-col gap-1">
+                <span class="text-xs font-semibold text-slate-600">教科</span>
+                <input
+                  class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-indigo-300 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+                  value={editSubject()}
+                  onInput={(e) => setEditSubject(e.currentTarget.value)}
+                  placeholder="math, english など"
+                />
+              </label>
+              <label class="flex flex-col gap-1">
+                <span class="text-xs font-semibold text-slate-600">タグ（カンマ区切り）</span>
+                <input
+                  class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-indigo-300 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+                  value={editTags()}
+                  onInput={(e) => setEditTags(e.currentTarget.value)}
+                  placeholder="二次関数, 復習"
+                />
+              </label>
+            </div>
+            <div class="mt-6 flex justify-end gap-2">
+              <button
+                class="rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+                onClick={() => setIsEditingLearning(false)}
+              >
+                キャンセル
+              </button>
+              <button
+                class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
+                onClick={handleSaveLearning}
+                disabled={isUpdatingLearning() || !editTitle().trim()}
+              >
+                {isUpdatingLearning() ? "保存中..." : "保存"}
+              </button>
+            </div>
+          </div>
+        </div>
+      </Show>
     </section>
     </Show>
   );
@@ -1912,8 +2270,20 @@ const PracticeSurface: Component = () => {
               <h3 class="text-lg font-semibold text-slate-900">練習問題がありません</h3>
               <p class="text-sm text-slate-600">
                 選択した学習にはまだ練習問題や一問一答が生成されていません。
-                学習詳細画面で問題を生成してから演習を始めましょう。
               </p>
+              <div class="rounded-lg border border-indigo-100 bg-indigo-50 p-4 text-left">
+                <p class="text-sm font-semibold text-indigo-900">
+                  演習用の問題を生成するには：
+                </p>
+                <ol class="mt-2 list-inside list-decimal space-y-1 text-sm text-indigo-800">
+                  <li>学習詳細画面を開く</li>
+                  <li>
+                    <span class="font-semibold">「練習問題」</span>または
+                    <span class="font-semibold">「一問一答」</span>タブを選択
+                  </li>
+                  <li>教材を選んで「生成」ボタンをクリック</li>
+                </ol>
+              </div>
               <div class="flex flex-col items-center gap-2 sm:flex-row sm:justify-center">
                 <button
                   class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-500"
@@ -1922,7 +2292,7 @@ const PracticeSurface: Component = () => {
                     if (id) navigate(`/learning-detail?id=${id}`);
                   }}
                 >
-                  学習詳細で生成する
+                  学習詳細を開く
                 </button>
                 <button
                   class="rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
@@ -2111,41 +2481,72 @@ const PracticeSurface: Component = () => {
                 回答
               </p>
               <Show when={mode() === "handwriting"}>
-                <div class="space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-3">
+                <div class="space-y-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
                   <div class="flex items-center justify-between gap-2">
                     <p class="text-xs font-semibold text-slate-700">手書き画像を取り込む (OCR)</p>
                     <Show when={isOcring()}>
-                      <span class="text-[11px] text-slate-500">OCR処理中...</span>
+                      <div class="flex items-center gap-2">
+                        <div class="h-4 w-4 animate-spin rounded-full border-2 border-indigo-600 border-t-transparent" />
+                        <span class="text-[11px] text-indigo-600">OCR処理中...</span>
+                      </div>
                     </Show>
                   </div>
-                  <label class="flex cursor-pointer items-center justify-center rounded-md border border-dashed border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:border-indigo-200 hover:text-indigo-700">
+                  <label class="flex cursor-pointer items-center justify-center rounded-md border-2 border-dashed border-slate-300 bg-white px-4 py-4 text-sm font-semibold text-slate-700 transition hover:border-indigo-300 hover:bg-indigo-50 hover:text-indigo-700">
                     <input
                       type="file"
                       accept="image/*"
                       class="sr-only"
                       onChange={(e) => handleHandwritingFile(e.currentTarget.files?.[0] ?? null)}
                     />
-                    画像をアップロードしてOCRする
+                    <div class="flex items-center gap-2">
+                      <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                      </svg>
+                      <span>手書きノートの画像を選択してOCR</span>
+                    </div>
                   </label>
                   <Show when={handwritingCapture()}>
                     {(capture) => (
-                      <div class="space-y-1 text-xs text-slate-600">
-                        <p class="font-semibold text-slate-800">添付: {capture().fileName}</p>
+                      <div class="space-y-3 rounded-lg border border-indigo-200 bg-white p-3">
+                        <div class="flex items-center justify-between">
+                          <p class="font-semibold text-slate-800">添付: {capture().fileName}</p>
+                          <button
+                            class="rounded-md border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                            onClick={() => {
+                              setHandwritingCapture(null);
+                              setAnswer("");
+                            }}
+                          >
+                            クリア
+                          </button>
+                        </div>
                         <Show when={capture().dataUrl}>
                           {(img) => (
                             <img
                               src={img()}
                               alt="手書き回答プレビュー"
-                              class="h-28 w-full rounded-md object-contain"
+                              class="max-h-48 w-full rounded-lg border border-slate-200 object-contain"
                             />
                           )}
                         </Show>
                         <Show when={capture().extractedText}>
                           {(text) => (
-                            <p class="text-slate-500">
-                              OCR抽出: {text().slice(0, 140)}
-                              {text().length > 140 ? "..." : ""}
-                            </p>
+                            <div class="space-y-1">
+                              <div class="flex items-center justify-between">
+                                <p class="text-xs font-semibold text-indigo-700">
+                                  OCR抽出結果（編集して回答に使用）
+                                </p>
+                                <p class="text-[11px] text-slate-500">
+                                  {text().length}文字
+                                </p>
+                              </div>
+                              <div class="rounded-md bg-indigo-50 p-2 text-sm text-slate-800">
+                                {text()}
+                              </div>
+                              <p class="text-[11px] text-slate-500">
+                                ↓下のテキストエリアにOCR結果がコピーされています。必要に応じて編集してください。
+                              </p>
+                            </div>
                           )}
                         </Show>
                       </div>
@@ -3553,7 +3954,21 @@ const MaterialSettingsSurface: Component = () => {
                     <p class="text-xs text-slate-500">ローカルプレビューを読み込んでいます...</p>
                   </Show>
                   <div class="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                    <Switch fallback={<p class="text-xs text-slate-500">{previewError() ?? "ファイルの直接プレビューは利用できません。抽出テキストを確認してください。"}</p>}>
+                    <Switch fallback={
+                      <div class="space-y-2">
+                        <p class="text-xs font-medium text-amber-700">
+                          {previewError() ?? "ファイルの直接プレビューは利用できません"}
+                        </p>
+                        <div class="rounded border border-amber-100 bg-amber-50/50 p-2">
+                          <p class="mb-1 text-xs font-semibold text-slate-600">代替案:</p>
+                          <ul class="list-inside list-disc space-y-1 text-xs text-slate-500">
+                            <li>下部の「抽出テキスト」から内容を確認してください</li>
+                            <li>「ソースを開く」リンクで元ファイルを開けます</li>
+                            <li>ライブラリ設定でローカルパスを登録するとプレビュー可能になります</li>
+                          </ul>
+                        </div>
+                      </div>
+                    }>
                       <Match when={material().type === "image" && previewUrl()}>
                         {(url) => (
                           <img

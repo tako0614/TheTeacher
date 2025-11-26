@@ -154,6 +154,9 @@ export const createContent = async (
     Partial<Pick<GeneratedContent, "id" | "createdAt">>,
 ) => requestJson<GeneratedContent>({ path: "/api/contents", method: "POST", body: input });
 
+export const deleteContent = async (id: string) =>
+  requestJson<{ ok: boolean }>({ path: `/api/contents/${id}`, method: "DELETE" });
+
 export const requestTtsGeneration = async (generatedContentId: string) =>
   requestJson<{ status: string }>({
     path: "/api/tts/generate",

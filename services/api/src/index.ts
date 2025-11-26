@@ -740,6 +740,15 @@ app.post("/api/contents", async (c) => {
   return c.json(saved, 201);
 });
 
+app.delete("/api/contents/:id", async (c) => {
+  const id = c.req.param("id");
+  const { user } = requireAuth(c);
+  const prisma = getPrismaClient(c.env.DB);
+  await prisma.generatedContent.deleteMany({ where: { id, userId: user.id } });
+  await deleteSemanticNodesByRef(c.env.DB, "generated_content", [id], user.id);
+  return c.json({ ok: true });
+});
+
 app.post("/api/generate/from-material", async (c) => {
   const { user } = requireAuth(c);
   const body = await c.req.json().catch(() => null);
