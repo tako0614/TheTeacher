@@ -4,7 +4,7 @@ import { createStore, produce } from "solid-js/store";
 import type { SemanticMatch } from "./ai";
 
 export type LearningAssemblyDraft = {
-  sourceLearningId: string;
+  sourceLearningId?: string;
   title: string;
   subject?: string;
   tags: string[];
@@ -28,7 +28,7 @@ const loadDraft = (): LearningAssemblyDraft | null => {
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw) as LearningAssemblyDraft;
-    if (!parsed.sourceLearningId || !parsed.title) {
+    if (!parsed.title) {
       return null;
     }
     return parsed;
@@ -86,17 +86,13 @@ export const createNewLearningDraftStore = () => {
   const clearDraft = () => setDraft(null);
 
   const seedDraftFromMatches = (matches: SemanticMatch[], overrides?: DraftSeedOverrides) => {
-    if (!matches.length && !overrides?.sourceLearningId) return null;
     const preferred = overrides?.sourceLearningId
       ? matches.find(
           (hit) => refIdOf(hit) === overrides.sourceLearningId && hit.refType === "learning",
         )
       : undefined;
     const learningHit = preferred ?? matches.find((hit) => hit.refType === "learning");
-    const sourceLearningId = overrides?.sourceLearningId ?? (learningHit ? refIdOf(learningHit) : "");
-    if (!sourceLearningId) {
-      return null;
-    }
+    const sourceLearningId = overrides?.sourceLearningId ?? (learningHit ? refIdOf(learningHit) : undefined);
 
     const subject = overrides?.subject ?? learningHit?.subject;
     const tags =

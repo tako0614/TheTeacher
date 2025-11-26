@@ -93,6 +93,9 @@ export const updateLearning = async (id: string, input: Partial<Learning>) =>
 export const deleteLearning = async (id: string) =>
   requestJson<{ ok: boolean }>({ path: `/api/learnings/${id}`, method: "DELETE" });
 
+export const fetchMaterial = async (id: string) =>
+  requestJson<Material | null>({ path: `/api/materials/${id}` });
+
 export const fetchMaterials = async (learningId: string) =>
   requestJson<{ items: Material[] }>({ path: `/api/learnings/${learningId}/materials` });
 

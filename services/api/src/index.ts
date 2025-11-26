@@ -324,6 +324,14 @@ app.get("/api/learnings/:id/materials", async (c) => {
   return c.json({ items });
 });
 
+app.get("/api/materials/:id", async (c) => {
+  const id = c.req.param("id");
+  const { user } = requireAuth(c);
+  const material = await fetchMaterial(c.env.DB, id, user.id);
+  if (!material) return c.json({ error: "not_found" }, 404);
+  return c.json(material);
+});
+
 app.post("/api/materials/ingest", async (c) => {
   const { user } = requireAuth(c);
   const body = await c.req.json().catch(() => null);

@@ -54,6 +54,7 @@ import {
   fetchContents,
   fetchLearnings,
   fetchLearning,
+  fetchMaterial,
   fetchMaterialLibrary,
   fetchMaterials,
   fetchSessions,
@@ -3469,6 +3470,13 @@ const NewLearningSurface: Component = () => {
   const [sourceLearningId, setSourceLearningId] = createSignal<string>();
   const [selectedMaterialIds, setSelectedMaterialIds] = createSignal<string[]>([]);
   const [selectedContentIds, setSelectedContentIds] = createSignal<string[]>([]);
+  
+  // External materials state
+  const [externalMaterials, setExternalMaterials] = createSignal<Material[]>([]);
+  const [materialSearchQuery, setMaterialSearchQuery] = createSignal("");
+  const [isSearchingMaterials, setIsSearchingMaterials] = createSignal(false);
+  const [materialSearchResults, setMaterialSearchResults] = createSignal<SemanticMatch[]>([]);
+
   const [title, setTitle] = createSignal("");
   const [tags, setTags] = createSignal("");
   const [status, setStatus] = createSignal<string | null>(null);
@@ -3500,16 +3508,19 @@ const NewLearningSurface: Component = () => {
     if (!list?.length) return;
     if (sourceLearningId() && list.some((item) => item.id === sourceLearningId())) return;
     const draft = activeDraft();
-    const first = draft && list.some((item) => item.id === draft.sourceLearningId)
+    const first = draft && draft.sourceLearningId && list.some((item) => item.id === draft.sourceLearningId)
       ? draft.sourceLearningId
       : list[0].id;
     setSourceLearningId(first);
   });
+
   createEffect(() => {
     const draft = activeDraft();
     if (!draft) return;
     if (hydratedDraftId() === draft.createdAt) return;
-    setSourceLearningId(draft.sourceLearningId);
+    if (draft.sourceLearningId) {
+      setSourceLearningId(draft.sourceLearningId);
+    }
     setTitle(draft.title);
     setTags(draft.tags.join(", "));
     if (draft.subject) {
@@ -3533,26 +3544,59 @@ const NewLearningSurface: Component = () => {
     () => sourceLearningId(),
     (id) => (id ? fetchContents(id).then((res) => res.items) : []),
   );
+
+  // Combined materials list (Source + External)
+  const allMaterials = createMemo(() => {
+    const source = materials() ?? [];
+    const external = externalMaterials();
+    const map = new Map<string, Material>();
+    source.forEach((m) => map.set(m.id, m));
+    external.forEach((m) => map.set(m.id, m));
+    return Array.from(map.values());
+  });
+
   createEffect(() => {
     const draft = activeDraft();
     if (!draft) return;
     if (hydratedDraftId() !== draft.createdAt) return;
     if (selectionDraftId() === draft.createdAt) return;
-    const mats = materials();
+    
+    const sourceMats = materials();
     const gens = generatedContents();
-    if (!mats || !gens) return;
-    setSelectedMaterialIds(
-      mats.filter((mat) => draft.recommendedMaterialIds.includes(mat.id)).map((mat) => mat.id),
-    );
-    setSelectedContentIds(
-      gens.filter((content) => draft.recommendedContentIds.includes(content.id)).map((content) => content.id),
-    );
+    
+    // We wait for source materials to load if a source is selected
+    if (draft.sourceLearningId && !sourceMats) return;
+
+    // Determine which IDs are "recommended"
+    const recMatIds = draft.recommendedMaterialIds;
+    const recContentIds = draft.recommendedContentIds;
+
+    // Add to selection
+    setSelectedMaterialIds(recMatIds);
+    setSelectedContentIds(recContentIds);
+
+    // Identify materials that are recommended but NOT in source
+    const missingMatIds = recMatIds.filter(id => !sourceMats?.some(m => m.id === id));
+    if (missingMatIds.length > 0) {
+      // Fetch missing materials and add to external
+      // This runs only once per draft hydration to avoid loops
+       Promise.all(missingMatIds.map(id => fetchMaterial(id)))
+        .then(results => {
+          const valid = results.filter((m): m is Material => !!m);
+          setExternalMaterials(prev => {
+             const currentIds = new Set(prev.map(m => m.id));
+             const newOnes = valid.filter(m => !currentIds.has(m.id));
+             return [...prev, ...newOnes];
+          });
+        });
+    }
+
     setSelectionDraftId(draft.createdAt);
   });
 
   const recommendedMaterials = createMemo(() => {
     const ids = activeDraft()?.recommendedMaterialIds ?? [];
-    return (materials() ?? []).filter((mat) => ids.includes(mat.id));
+    return allMaterials().filter((mat) => ids.includes(mat.id));
   });
   const recommendedGenerated = createMemo(() => {
     const ids = activeDraft()?.recommendedContentIds ?? [];
@@ -3570,6 +3614,32 @@ const NewLearningSurface: Component = () => {
   const handleSearch = () => {
     setSearchQuery(pendingQuery().trim());
   };
+  
+  const handleMaterialSearch = async () => {
+    const query = materialSearchQuery().trim();
+    if (!query) return;
+    setIsSearchingMaterials(true);
+    try {
+      const results = await semanticSearch(query, 5, { refType: "material" });
+      setMaterialSearchResults(results);
+    } finally {
+      setIsSearchingMaterials(false);
+    }
+  };
+
+  const handleAddMaterialFromSearch = async (hit: SemanticMatch) => {
+     if (!hit.refId) return;
+     const mat = await fetchMaterial(hit.refId);
+     if (mat) {
+       setExternalMaterials(prev => {
+         if (prev.some(m => m.id === mat.id)) return prev;
+         return [...prev, mat];
+       });
+       setSelectedMaterialIds(prev => [...prev, mat.id]);
+       setMaterialSearchQuery("");
+       setMaterialSearchResults([]);
+     }
+  };
 
   const handleApplyDraftFilters = () => {
     const draft = activeDraft();
@@ -3579,36 +3649,35 @@ const NewLearningSurface: Component = () => {
     if (draft.subject) {
       setSubjectFilter(draft.subject);
     }
-    setSourceLearningId(draft.sourceLearningId);
+    if (draft.sourceLearningId) {
+      setSourceLearningId(draft.sourceLearningId);
+    }
     setSelectionDraftId(null);
   };
 
   const handleApplyRecommended = () => {
     const draft = activeDraft();
     if (!draft) return;
-    setSourceLearningId(draft.sourceLearningId);
+    if (draft.sourceLearningId) {
+      setSourceLearningId(draft.sourceLearningId);
+    }
     setSelectionDraftId(null);
-    const mats = materials();
-    const gens = generatedContents();
-    if (mats) {
-      setSelectedMaterialIds(
-        mats.filter((mat) => draft.recommendedMaterialIds.includes(mat.id)).map((mat) => mat.id),
-      );
-    }
-    if (gens) {
-      setSelectedContentIds(
-        gens.filter((content) => draft.recommendedContentIds.includes(content.id)).map((content) => content.id),
-      );
-    }
+    
+    // Re-trigger selection logic (handled by Effect)
+    setSelectedMaterialIds(draft.recommendedMaterialIds);
+    setSelectedContentIds(draft.recommendedContentIds);
   };
 
   const handleCreate = async () => {
-    const source = learningSearch()?.find((learning) => learning.id === sourceLearningId());
-    if (!source) {
-      setStatus("抽出元の学習を選択してください。");
+    // If no source is selected, we need at least some materials or a title
+    if (!sourceLearningId() && selectedMaterialIds().length === 0) {
+      setStatus("抽出元の学習を選択するか、教材を追加してください。");
       return;
     }
-    const normalizedTitle = title().trim() || `${source.title}_派生`;
+    const source = learningSearch()?.find((learning) => learning.id === sourceLearningId());
+    
+    const defaultTitle = source ? `${source.title}_派生` : "新しい学習";
+    const normalizedTitle = title().trim() || defaultTitle;
     const normalizedTags = tags()
       .split(",")
       .map((tag) => tag.trim())
@@ -3619,15 +3688,15 @@ const NewLearningSurface: Component = () => {
     try {
       const newLearning = await createLearning({
         title: normalizedTitle,
-        subject: source.subject,
-        tags: normalizedTags.length > 0 ? normalizedTags : source.tags,
+        subject: source?.subject ?? subjectFilter(),
+        tags: normalizedTags.length > 0 ? normalizedTags : (source?.tags ?? []),
       });
 
       const materialList =
-        materials()
-          ?.filter((mat) => selectedMaterialIds().includes(mat.id))
+        allMaterials()
+          .filter((mat) => selectedMaterialIds().includes(mat.id))
           // eslint-disable-next-line @typescript-eslint/no-unused-vars
-          .map(({ id: _id, learningId: _learning, createdAt: _c, updatedAt: _u, ...rest }) => rest) ?? [];
+          .map(({ id: _id, learningId: _learning, createdAt: _c, updatedAt: _u, ...rest }) => rest);
       const contentList =
         generatedContents()
           ?.filter((content) => selectedContentIds().includes(content.id))
@@ -3656,6 +3725,7 @@ const NewLearningSurface: Component = () => {
       );
       setSelectedMaterialIds([]);
       setSelectedContentIds([]);
+      setExternalMaterials([]);
       newLearningDraft.clearDraft();
     } catch (error) {
       setStatus(
@@ -3802,6 +3872,60 @@ const NewLearningSurface: Component = () => {
 
           <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
             <p class="text-xs font-semibold uppercase text-slate-500">
+              追加で教材を検索
+            </p>
+            <div class="mt-3 space-y-2 text-sm text-slate-800">
+              <div class="flex gap-2">
+                <input
+                  class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                  placeholder="教材の意味検索..."
+                  value={materialSearchQuery()}
+                  onInput={(e) => setMaterialSearchQuery(e.currentTarget.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleMaterialSearch()}
+                />
+                <button
+                  class="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white shadow-sm hover:bg-indigo-500 disabled:opacity-60"
+                  onClick={handleMaterialSearch}
+                  disabled={isSearchingMaterials() || !materialSearchQuery()}
+                >
+                  {isSearchingMaterials() ? "検索中..." : "検索"}
+                </button>
+              </div>
+              <Show when={materialSearchResults().length > 0}>
+                <div class="space-y-2 rounded-lg border border-indigo-100 bg-indigo-50 p-2">
+                  <For each={materialSearchResults()}>
+                    {(hit) => (
+                      <div class="flex items-center justify-between rounded bg-white p-2 shadow-sm">
+                        <div>
+                          <p class="font-semibold">{hit.label}</p>
+                          <p class="text-xs text-slate-500">{hit.excerpt}</p>
+                        </div>
+                        <button
+                          class="rounded border border-indigo-200 px-2 py-1 text-xs font-semibold text-indigo-700 hover:bg-indigo-50"
+                          onClick={() => handleAddMaterialFromSearch(hit)}
+                        >
+                          追加
+                        </button>
+                      </div>
+                    )}
+                  </For>
+                </div>
+              </Show>
+              <Show when={externalMaterials().length > 0}>
+                 <div class="rounded-lg bg-slate-50 p-2 text-xs">
+                   <p class="font-semibold text-slate-600">追加済み教材 ({externalMaterials().length})</p>
+                   <ul class="mt-1 list-disc pl-4 text-slate-600">
+                     <For each={externalMaterials()}>
+                       {(mat) => <li>{mat.metadata?.name ?? mat.sourcePath ?? mat.type}</li>}
+                     </For>
+                   </ul>
+                 </div>
+              </Show>
+            </div>
+          </div>
+
+          <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <p class="text-xs font-semibold uppercase text-slate-500">
               ② 抽出プレビュー
             </p>
             <div class="mt-2 space-y-3 text-sm text-slate-800">
@@ -3841,10 +3965,10 @@ const NewLearningSurface: Component = () => {
                 <div class="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2">
                   <div class="flex items-center justify-between text-[11px] font-semibold text-slate-600">
                     <span>教材プレビュー</span>
-                    <span>{materials()?.length ?? 0} 件</span>
+                    <span>{allMaterials().length} 件</span>
                   </div>
                   <div class="mt-2 space-y-2">
-                    <For each={(materials() ?? []).slice(0, 4)}>
+                    <For each={allMaterials().slice(0, 4)}>
                       {(material) => {
                         const isRecommended = recommendedMaterials().some((item) => item.id === material.id);
                         return (
@@ -3866,7 +3990,7 @@ const NewLearningSurface: Component = () => {
                         );
                       }}
                     </For>
-                    <Show when={(materials() ?? []).length === 0}>
+                    <Show when={allMaterials().length === 0}>
                       <p class="text-xs text-slate-500">この学習には教材がありません。</p>
                     </Show>
                   </div>
@@ -3918,7 +4042,7 @@ const NewLearningSurface: Component = () => {
               <button
                 class="rounded-md border border-slate-200 px-3 py-1.5 text-[11px] font-semibold text-slate-700 hover:bg-slate-50"
                 onClick={() => {
-                  setSelectedMaterialIds(materials()?.map((item) => item.id) ?? []);
+                  setSelectedMaterialIds(allMaterials().map((item) => item.id));
                   setSelectedContentIds(generatedContents()?.map((item) => item.id) ?? []);
                 }}
               >
@@ -3946,7 +4070,7 @@ const NewLearningSurface: Component = () => {
             <div class="grid gap-3 md:grid-cols-2">
               <div class="space-y-2 rounded-lg border border-slate-100 bg-slate-50 px-3 py-2">
                 <p class="text-xs font-semibold text-slate-600">教材</p>
-                <For each={materials() ?? []}>
+                <For each={allMaterials()}>
                   {(material) => {
                     const isRecommended = recommendedMaterials().some((item) => item.id === material.id);
                     return (
@@ -3977,7 +4101,7 @@ const NewLearningSurface: Component = () => {
                     );
                   }}
                 </For>
-                <Show when={(materials() ?? []).length === 0}>
+                <Show when={allMaterials().length === 0}>
                   <p class="text-xs text-slate-500">教材がありません。</p>
                 </Show>
               </div>
