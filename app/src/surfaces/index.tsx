@@ -71,6 +71,8 @@ import { selectPresetOptions, useSettings } from "../lib/settings-store";
 import { useNewLearningDraft } from "../lib/new-learning-draft-store";
 import { processMaterialFile } from "../lib/file-processing";
 import { gradePracticeAnswer } from "../lib/practice";
+import PresetManagementSurface from "./PresetManagementSurface";
+import RelatedContent from "../components/RelatedContent";
 
 const subjects = [
   { id: "all", label: "すべて" },
@@ -1136,6 +1138,8 @@ const LearningDetailSurface: Component = () => {
         </div>
 
         <div class="space-y-3">
+          <RelatedContent query={learning()?.title ?? ""} learningId={learning()?.id} />
+
           <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
             <p class="text-xs font-semibold uppercase text-slate-500">
               インデックス投入キュー
@@ -4063,6 +4067,7 @@ const NewLearningSurface: Component = () => {
 };
 
 const AppSettingsSurface: Component = () => {
+  const navigate = useNavigate();
   const settings = useSettings();
   const auth = useAuth();
   const defaultDeviceName =
@@ -4075,56 +4080,11 @@ const AppSettingsSurface: Component = () => {
   const [isSavingProfile, setIsSavingProfile] = createSignal(false);
   const [isIssuingSession, setIsIssuingSession] = createSignal(false);
 
-  const [editingPresetId, setEditingPresetId] = createSignal<string | undefined>();
-  const [presetSubject, setPresetSubject] = createSignal("math");
-  const [presetTitle, setPresetTitle] = createSignal("");
-  const [presetSystemPrompt, setPresetSystemPrompt] = createSignal("");
-  const [presetUserTemplate, setPresetUserTemplate] = createSignal("");
   const [backupMessage, setBackupMessage] = createSignal<string | null>(null);
   const [backupError, setBackupError] = createSignal<string | null>(null);
   const [isExporting, setIsExporting] = createSignal(false);
   const [isImporting, setIsImporting] = createSignal(false);
-  const [isSyncingPresets, setIsSyncingPresets] = createSignal(false);
   let importInputRef: HTMLInputElement | undefined;
-
-  const resetPresetDraft = () => {
-    const fallback = settings.state.presets[0];
-    setEditingPresetId(undefined);
-    setPresetSubject(fallback?.subject ?? "math");
-    setPresetTitle("");
-    setPresetSystemPrompt(
-      fallback?.systemPrompt ?? "学習のねらいと出力形式をここに書きます。",
-    );
-    setPresetUserTemplate(
-      fallback?.userInstructionTemplate ??
-        "教材テキスト: {{material}}\n出力: Q&Aと要約を作ってください。",
-    );
-  };
-
-  const syncPresetsFromApi = async () => {
-    setBackupError(null);
-    setIsSyncingPresets(true);
-    try {
-      const presets = await fetchPresets({ limit: 50 });
-      if (presets.length) {
-        settings.replacePresets(presets);
-        setBackupMessage(`バックエンドのプリセット ${presets.length} 件を読み込みました。`);
-      }
-    } catch (error) {
-      setBackupError(
-        error instanceof Error
-          ? error.message
-          : "プリセットの取得に失敗しました。",
-      );
-    } finally {
-      setIsSyncingPresets(false);
-    }
-  };
-
-  onMount(() => {
-    resetPresetDraft();
-    void syncPresetsFromApi();
-  });
 
   const syncAuthFields = () => {
     setEmail(auth.state.user?.email ?? "");
@@ -4132,93 +4092,6 @@ const AppSettingsSurface: Component = () => {
   };
 
   createEffect(syncAuthFields);
-
-  const savePreset = async () => {
-    setBackupError(null);
-    const title = presetTitle().trim();
-    if (!title || !presetSystemPrompt().trim() || !presetUserTemplate().trim()) {
-      setBackupError("プリセット名とプロンプトは必須です。");
-      return;
-    }
-    setIsSyncingPresets(true);
-    const saved = settings.upsertPreset({
-      id: editingPresetId(),
-      subject: presetSubject().trim() || "general",
-      title,
-      systemPrompt: presetSystemPrompt().trim(),
-      userInstructionTemplate: presetUserTemplate().trim(),
-    });
-    try {
-      if (editingPresetId()) {
-        await updatePreset(saved.id, {
-          subject: saved.subject,
-          title: saved.title,
-          systemPrompt: saved.systemPrompt,
-          userInstructionTemplate: saved.userInstructionTemplate,
-          createdAt: saved.createdAt,
-          updatedAt: saved.updatedAt,
-        });
-      } else {
-        await createPreset(saved);
-      }
-      setBackupMessage(`プリセットを保存しました: ${saved.title}`);
-      resetPresetDraft();
-    } catch (error) {
-      setBackupError(
-        error instanceof Error
-          ? error.message
-          : "プリセットの保存に失敗しました。",
-      );
-    } finally {
-      setIsSyncingPresets(false);
-    }
-  };
-
-  const editPreset = (preset: Preset) => {
-    setEditingPresetId(preset.id);
-    setPresetSubject(preset.subject);
-    setPresetTitle(preset.title);
-    setPresetSystemPrompt(preset.systemPrompt);
-    setPresetUserTemplate(preset.userInstructionTemplate);
-  };
-
-  const duplicatePreset = async (id: string) => {
-    const duplicated = settings.duplicatePreset(id);
-    if (!duplicated) return;
-    setIsSyncingPresets(true);
-    try {
-      await createPreset(duplicated);
-      setBackupMessage(`プリセットを複製しました: ${duplicated.title}`);
-    } catch (error) {
-      setBackupError(
-        error instanceof Error
-          ? error.message
-          : "プリセットの複製に失敗しました。",
-      );
-    } finally {
-      setIsSyncingPresets(false);
-    }
-  };
-
-  const deletePreset = async (id: string) => {
-    setIsSyncingPresets(true);
-    try {
-      await deletePresetApi(id);
-      settings.deletePreset(id);
-      setBackupMessage("プリセットを削除しました");
-      if (editingPresetId() === id) {
-        resetPresetDraft();
-      }
-    } catch (error) {
-      setBackupError(
-        error instanceof Error
-          ? error.message
-          : "プリセットの削除に失敗しました。",
-      );
-    } finally {
-      setIsSyncingPresets(false);
-    }
-  };
 
   const handleExport = async () => {
     setIsExporting(true);
@@ -4364,10 +4237,10 @@ const AppSettingsSurface: Component = () => {
           設定
         </p>
         <h1 class="text-2xl font-bold text-slate-900">
-          教科別プリセットとAI設定、バックアップを管理
+          AI設定とバックアップ、アカウント管理
         </h1>
         <p class="text-sm text-slate-600">
-          モデル設定とプリセットのテーブル、バックアップ/エクスポートの状態を1画面にまとめています。
+          モデル設定、バックアップ/エクスポート、アカウント連携を管理します。
         </p>
       </header>
 
@@ -4620,150 +4493,15 @@ const AppSettingsSurface: Component = () => {
               教科プリセット
             </p>
             <p class="text-sm text-slate-600">
-              一覧・複製・削除をここで管理します。教科タグでフィルタできます。
+              AI生成に使用するプロンプトテンプレートの管理は専用画面に移動しました。
             </p>
           </div>
-          <div class="flex items-center gap-2">
-            <button
-              class="rounded-md border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
-              onClick={() => void syncPresetsFromApi()}
-              disabled={isSyncingPresets()}
-            >
-              {isSyncingPresets() ? "同期中..." : "バックエンドと同期"}
-            </button>
-            <button
-              class="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-100 disabled:opacity-60"
-              onClick={savePreset}
-              disabled={isSyncingPresets()}
-            >
-              + プリセットを追加
-            </button>
-          </div>
-        </div>
-
-        <div class="mt-3 grid gap-3 rounded-lg bg-slate-50 p-3 text-sm">
-          <div class="grid gap-2 md:grid-cols-2">
-            <label class="flex flex-col gap-1">
-              <span class="text-xs font-semibold text-slate-600">教科</span>
-              <select
-                class="rounded-md border border-slate-200 px-2 py-1"
-                value={presetSubject()}
-                onInput={(event) => setPresetSubject(event.currentTarget.value)}
-              >
-                <option value="math">math</option>
-                <option value="english">english</option>
-                <option value="science">science</option>
-                <option value="programming">programming</option>
-              </select>
-            </label>
-            <label class="flex flex-col gap-1">
-              <span class="text-xs font-semibold text-slate-600">
-                プリセット名
-              </span>
-              <input
-                class="rounded-md border border-slate-200 px-2 py-1"
-                value={presetTitle()}
-                onInput={(event) => setPresetTitle(event.currentTarget.value)}
-                placeholder="math_detail など"
-              />
-            </label>
-          </div>
-          <label class="flex flex-col gap-1">
-            <span class="text-xs font-semibold text-slate-600">
-              システムプロンプト
-            </span>
-            <textarea
-              class="min-h-[80px] rounded-md border border-slate-200 px-2 py-1"
-              value={presetSystemPrompt()}
-              onInput={(event) => setPresetSystemPrompt(event.currentTarget.value)}
-            />
-          </label>
-          <label class="flex flex-col gap-1">
-            <span class="text-xs font-semibold text-slate-600">
-              ユーザーテンプレート
-            </span>
-            <textarea
-              class="min-h-[80px] rounded-md border border-slate-200 px-2 py-1"
-              value={presetUserTemplate()}
-              onInput={(event) => setPresetUserTemplate(event.currentTarget.value)}
-            />
-          </label>
-          <div class="flex gap-2">
-            <button
-              class="rounded-md bg-indigo-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500"
-              onClick={savePreset}
-            >
-              {editingPresetId() ? "プリセットを更新" : "プリセットを追加"}
-            </button>
-            <button
-              class="rounded-md border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
-              onClick={resetPresetDraft}
-            >
-              編集をクリア
-            </button>
-            <Show when={editingPresetId()}>
-                <button
-                  class="rounded-md border border-rose-200 px-3 py-2 text-xs font-semibold text-rose-700 hover:bg-rose-50"
-                  onClick={() => deletePreset(editingPresetId()!)}
-                >
-                  削除
-                </button>
-            </Show>
-          </div>
-        </div>
-
-        <div class="mt-3 overflow-hidden rounded-lg border border-slate-200">
-          <table class="min-w-full divide-y divide-slate-200 text-sm">
-            <thead class="bg-slate-50 text-left text-xs uppercase text-slate-500">
-              <tr>
-                <th class="px-3 py-2">教科</th>
-                <th class="px-3 py-2">プリセット名</th>
-                <th class="px-3 py-2">プロンプト要約</th>
-                <th class="px-3 py-2 text-right">操作</th>
-              </tr>
-            </thead>
-            <tbody class="divide-y divide-slate-200 bg-white text-slate-800">
-              <For each={settings.state.presets}>
-                {(preset) => (
-                  <tr>
-                    <td class="px-3 py-2 font-semibold uppercase text-slate-700">
-                      {preset.subject}
-                    </td>
-                    <td class="px-3 py-2">{preset.title}</td>
-                    <td class="px-3 py-2">
-                      {preset.systemPrompt.slice(0, 32)}
-                      {preset.systemPrompt.length > 32 ? "..." : ""}
-                    </td>
-                    <td class="px-3 py-2">
-                      <div class="flex justify-end gap-2">
-                        <button
-                          class="rounded-md border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50"
-                          onClick={() => editPreset(preset)}
-                          disabled={isSyncingPresets()}
-                        >
-                          編集
-                        </button>
-                        <button
-                          class="rounded-md border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50"
-                          onClick={() => duplicatePreset(preset.id)}
-                          disabled={isSyncingPresets()}
-                        >
-                          複製
-                        </button>
-                        <button
-                          class="rounded-md border border-rose-200 px-2 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-50"
-                          onClick={() => deletePreset(preset.id)}
-                          disabled={isSyncingPresets()}
-                        >
-                          削除
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                )}
-              </For>
-            </tbody>
-          </table>
+          <button
+            class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-500"
+            onClick={() => navigate("/presets")}
+          >
+            プリセット管理画面へ
+          </button>
         </div>
       </div>
     </section>
@@ -4798,6 +4536,12 @@ export const surfaces: Surface[] = [
     description:
       "問題を左、回答とAIフィードバックを右に置き、手書き/テキスト入力を切り替える演習モード。",
     component: PracticeSurface,
+  },
+  {
+    path: "/presets",
+    name: "プリセット管理",
+    description: "AI生成に使用するプロンプトテンプレートを教科ごとに管理。",
+    component: PresetManagementSurface,
   },
   {
     path: "/chat",

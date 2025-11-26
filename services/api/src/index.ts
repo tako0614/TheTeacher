@@ -61,7 +61,6 @@ import {
   listLearnings,
   listLibraryEntries,
   mapGeneratedContent,
-  mapLearning,
   mapMaterial,
   mapPracticeSession,
   mapPreset,
