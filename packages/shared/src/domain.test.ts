@@ -59,7 +59,12 @@ describe("shared domain schemas", () => {
       questionRef: { id: "q1" },
       answerText: "42",
       isCorrect: true,
-      feedback: { reason: "good job" },
+      feedback: {
+        score: 1,
+        verdict: "correct",
+        comment: "good job",
+        reasoning: "解法のステップが期待どおりでした",
+      },
       score: 1,
       createdAt: now,
     });

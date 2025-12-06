@@ -51,12 +51,23 @@ export const chunkMaterialText = (
       }
       return acc;
     }, [] as string[])
-    // Further split very long segments by double newlines if they exceed token limits (simplified)
-    .flatMap(seg => {
-        if (countTokens(seg) > maxTokens) {
-            return seg.split(/\n{2,}/).map(s => s.trim()).filter(Boolean);
+    // Further split very long segments if they exceed token limits (simplified)
+    .flatMap((seg) => {
+      const tokens = countTokens(seg);
+      if (tokens > maxTokens) {
+        const sentenceSegments = seg
+          .split(/(?<=[.!?])\s+/)
+          .map((entry) => entry.trim())
+          .filter(Boolean);
+        if (sentenceSegments.length > 1) {
+          return sentenceSegments;
         }
-        return [seg];
+        return seg
+          .split(/\n{2,}/)
+          .map((s) => s.trim())
+          .filter(Boolean);
+      }
+      return [seg];
     });
 
   const chunks: MaterialChunkRecord[] = [];
@@ -127,6 +138,10 @@ interface EmbeddingBatchResult {
   provider: EmbeddingProvider;
 }
 
+export interface GenerateEmbeddingsOptions {
+  allowFallback?: boolean;
+}
+
 export const toEmbedding = (text: string, dimension = FALLBACK_EMBEDDING_DIMENSION): number[] => {
   const vec = Array.from({ length: dimension }, () => 0);
   for (let i = 0; i < text.length; i++) {
@@ -145,7 +160,9 @@ export const normalizeEmbeddingVector = (vector: unknown): number[] => {
 export const generateEmbeddings = async (
   texts: string[],
   env?: AppBindings,
+  options?: GenerateEmbeddingsOptions,
 ): Promise<EmbeddingBatchResult> => {
+  const allowFallback = options?.allowFallback ?? true;
   if (texts.length === 0) {
     return { embeddings: [], dimension: FALLBACK_EMBEDDING_DIMENSION, provider: "fallback" };
   }
@@ -156,6 +173,9 @@ export const generateEmbeddings = async (
     env?.OPENAI_EMBEDDING_MODEL?.trim() ||
     DEFAULT_EMBEDDING_MODEL;
   if (!apiKey) {
+    if (!allowFallback) {
+      throw new Error("OPENAI_API_KEY is required to generate embeddings");
+    }
     return {
       embeddings: texts.map((text) => toEmbedding(text)),
       dimension: FALLBACK_EMBEDDING_DIMENSION,
@@ -193,6 +213,11 @@ export const generateEmbeddings = async (
     };
   } catch (error) {
     console.warn("embedding generation failed, falling back", error);
+    if (!allowFallback) {
+      throw error instanceof Error
+        ? error
+        : new Error("OpenAI embedding request failed without fallback");
+    }
     return {
       embeddings: texts.map((text) => toEmbedding(text)),
       dimension: FALLBACK_EMBEDDING_DIMENSION,
@@ -219,15 +244,19 @@ export const cosineSimilarity = (a: number[], b: number[]): number => {
 export const attachEmbeddingsToChunks = async (
   chunks: MaterialChunkRecord[],
   env?: AppBindings,
+  options?: GenerateEmbeddingsOptions,
 ): Promise<{
   chunks: MaterialChunkRecord[];
   dimension: number;
   provider: EmbeddingProvider;
   model?: string;
 }> => {
+  const hasOpenAiKey = Boolean(env?.OPENAI_API_KEY?.trim());
+  const allowFallback = options?.allowFallback ?? !hasOpenAiKey;
   const { embeddings, dimension, provider, model } = await generateEmbeddings(
     chunks.map((chunk) => chunk.text),
     env,
+    { allowFallback },
   );
   return {
     chunks: chunks.map((chunk, index) => ({

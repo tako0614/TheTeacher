@@ -1,9 +1,16 @@
 import { randomUUID } from "node:crypto";
+import type { D1Database } from "@cloudflare/workers-types";
+import type { Material } from "@theteacher/shared";
 
 import type { IngestJob } from "@theteacher/shared";
 import { describe, expect, it } from "vitest";
 
+import * as dataModule from "./api/data";
+import * as ingestModule from "./api/ingest";
+import * as generationModule from "./api/generation";
+import * as proxyModule from "./api/proxy";
 import { app, __ingestTestHelpers } from "./index";
+import * as libraryModule from "./core/library";
 
 const { chunkMaterialText, attachEmbeddingsToChunks, prepareJobForProcessing } = __ingestTestHelpers;
 
@@ -121,5 +128,130 @@ describe("api worker", () => {
     expect(prepared.steps[0].status).toBe("succeeded");
     expect(prepared.steps[1].status).toBe("running");
     expect(prepared.steps[2].status).toBe("pending");
+  });
+
+  it("falls back gracefully when proxy chat LLM fails", async () => {
+    const spy = vi.spyOn(proxyModule, "callOpenAiProxyChat").mockResolvedValue(null);
+    const res = await app.request("/ai/proxy", {
+      method: "POST",
+      body: JSON.stringify({ prompt: "代替案を提案して" }),
+    });
+
+    const json = await res.json();
+    expect(res.status).toBe(200);
+    expect(json.message).toContain("関連候補");
+    expect(Array.isArray(json.toolCalls)).toBe(true);
+    expect(json.toolCalls.length).toBeGreaterThan(0);
+    spy.mockRestore();
+  });
+
+  it("returns fallback grading feedback when model errors", async () => {
+    const gradingSpy = vi
+      .spyOn(generationModule, "gradeWithOpenAi")
+      .mockRejectedValue(new Error("grading_failed"));
+
+    const res = await app.request("/ai/practice/grade", {
+      method: "POST",
+      body: JSON.stringify({
+        question: { prompt: "2 + 3 は？", expected: "5" },
+        answer: "6",
+        mode: "text",
+      }),
+    });
+
+    const json = await res.json();
+    expect(res.status).toBe(200);
+    expect(json.feedback).toBeDefined();
+    expect(json.feedback.verdict).toBeDefined();
+    expect(json.feedback.usedAi).toBe(false);
+    expect(json.feedback.raw).toBe("grading_failed");
+    gradingSpy.mockRestore();
+  });
+
+  it("keeps the ingest queue running after a failed job", async () => {
+    const now = new Date().toISOString();
+    const failedJob: IngestJob = {
+      id: "job-failed",
+      learningId: "learning-1",
+      source: { kind: "text", text: "missing material" },
+      status: "queued",
+      requestedAt: now,
+      updatedAt: now,
+      steps: [
+        { id: "chunk", label: "chunk", kind: "chunking", status: "pending" },
+        { id: "embed", label: "embed", kind: "embedding", status: "pending" },
+      ],
+    };
+    const okJob: IngestJob = {
+      ...failedJob,
+      id: "job-ok",
+      source: { kind: "text", text: "チャンク対象の文章" },
+    };
+
+    const material: Material = {
+      id: "material-ok",
+      learningId: okJob.learningId,
+      type: "text" as const,
+      sourcePath: "local://material",
+      rawContent: "これは教材テキストです。",
+      metadata: {},
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const fetchIngestJob = vi
+      .spyOn(libraryModule, "fetchIngestJob")
+      .mockImplementation(async (_db, jobId) => {
+        if (jobId === failedJob.id) return { ...failedJob };
+        if (jobId === okJob.id) return { ...okJob };
+        return null;
+      });
+
+    const fetchMaterial = vi
+      .spyOn(dataModule, "fetchMaterial")
+      .mockImplementation(async (_db, materialId) => {
+        if (materialId === material.id) return { ...material };
+        return null;
+      });
+
+    const saveIngestJob = vi
+      .spyOn(libraryModule, "saveIngestJob")
+      .mockImplementation(async (_db, job) => job);
+
+    const applyMaterialMetadataPatch = vi
+      .spyOn(dataModule, "applyMaterialMetadataPatch")
+      .mockResolvedValue(undefined);
+
+    const history: Record<string, IngestJob["status"][]> = {};
+    saveIngestJob.mockImplementation(async (_db, job) => {
+      history[job.id] = [...(history[job.id] ?? []), job.status];
+      return job;
+    });
+
+    await Promise.all([
+      ingestModule.enqueueIngestJobProcessing({
+        db: {} as unknown as D1Database,
+        env: {} as never,
+        jobId: failedJob.id,
+        materialId: "missing-material",
+        learningId: failedJob.learningId,
+      }),
+      ingestModule.enqueueIngestJobProcessing({
+        db: {} as unknown as D1Database,
+        env: {} as never,
+        jobId: okJob.id,
+        materialId: material.id,
+        learningId: okJob.learningId,
+        text: material.rawContent ?? "",
+      }),
+    ]);
+
+    expect(history[failedJob.id]).toContain("failed");
+    expect(history[okJob.id][history[okJob.id].length - 1]).toBe("completed");
+
+    fetchIngestJob.mockRestore();
+    fetchMaterial.mockRestore();
+    saveIngestJob.mockRestore();
+    applyMaterialMetadataPatch.mockRestore();
   });
 });

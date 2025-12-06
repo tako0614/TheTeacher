@@ -31,6 +31,7 @@ export const userSchema = z.object({
   id: z.string().uuid(),
   email: z.string().email().optional(),
   displayName: z.string().min(1).optional(),
+  credits: z.number().int().min(0).default(0),
   createdAt: isoDateTimeString,
   updatedAt: isoDateTimeString,
   lastSeenAt: isoDateTimeString.optional(),

@@ -7,8 +7,9 @@ import {
 } from "solid-js";
 import { createStore } from "solid-js/store";
 
-import { bootstrapSession, clearSessionToken, ensureSessionToken, readSessionToken } from "./auth";
-import { fetchAuthSession, issueSession, updateUserProfile } from "./api-client";
+import { clearSessionToken, ensureSessionToken, readSessionToken } from "./auth";
+import { getGoogleIdToken } from "./google-auth";
+import { fetchAuthSession, issueSession, loginWithGoogle, updateUserProfile } from "./api-client";
 
 type AuthStatus = "idle" | "loading" | "ready" | "error";
 
@@ -23,11 +24,7 @@ type AuthState = {
 type AuthContextValue = {
   state: AuthState;
   refresh: () => Promise<void>;
-  signIn: (input: {
-    email?: string;
-    displayName?: string;
-    deviceName?: string;
-  }) => Promise<AuthSessionResponse>;
+  signInWithGoogle: () => Promise<AuthSessionResponse>;
   rotateSession: (deviceName?: string) => Promise<AuthSessionResponse>;
   updateProfile: (input: UpdateUserProfileRequest) => Promise<User>;
   signOut: () => void;
@@ -45,6 +42,7 @@ const defaultState: AuthState = {
 
 export const createAuthStore = () => {
   const [state, setState] = createStore<AuthState>(defaultState);
+  let triedInitialRefresh = false;
 
   const refresh = async () => {
     setState({ status: "loading", error: null });
@@ -60,16 +58,20 @@ export const createAuthStore = () => {
       });
     } catch (error) {
       setState({
-        status: "error",
+        status: "idle",
+        token: null,
+        user: null,
+        session: null,
         error: error instanceof Error ? error.message : "Failed to load session",
       });
     }
   };
 
-  const signIn: AuthContextValue["signIn"] = async (input) => {
+  const signInWithGoogle: AuthContextValue["signInWithGoogle"] = async () => {
     setState({ status: "loading", error: null });
     try {
-      const response = await bootstrapSession(input);
+      const idToken = await getGoogleIdToken();
+      const response = await loginWithGoogle(idToken);
       setState({
         status: "ready",
         token: response.token,
@@ -138,7 +140,8 @@ export const createAuthStore = () => {
   };
 
   createEffect(() => {
-    if (state.status === "idle") {
+    if (state.status === "idle" && !triedInitialRefresh) {
+      triedInitialRefresh = true;
       void refresh();
     }
   });
@@ -146,7 +149,7 @@ export const createAuthStore = () => {
   return {
     state,
     refresh,
-    signIn,
+    signInWithGoogle,
     rotateSession,
     updateProfile: updateProfileMutation,
     signOut,

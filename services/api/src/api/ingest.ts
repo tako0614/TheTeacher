@@ -1036,10 +1036,22 @@ export const prepareJobForProcessing = (job: IngestJob): IngestJob => {
       updatedAt: now,
     };
   }
-  let firstPendingMarked = false;
-  const steps = job.steps.map((step) => {
-    if (!firstPendingMarked && step.status === "pending") {
-      firstPendingMarked = true;
+  const firstPendingIndex = job.steps.findIndex((step) => step.status === "pending");
+  if (firstPendingIndex === -1) {
+    return { ...job, status: "completed", updatedAt: now };
+  }
+
+  const steps = job.steps.map((step, index) => {
+    if (index === firstPendingIndex) {
+      return {
+        ...step,
+        status: "succeeded",
+        startedAt: step.startedAt ?? now,
+        finishedAt: step.finishedAt ?? now,
+        error: undefined,
+      };
+    }
+    if (index === firstPendingIndex + 1 && step.status === "pending") {
       return {
         ...step,
         status: "running",
@@ -1049,6 +1061,7 @@ export const prepareJobForProcessing = (job: IngestJob): IngestJob => {
     }
     return step;
   });
+
   const hasWork = steps.some((step) => step.status === "running" || step.status === "pending");
   return {
     ...job,

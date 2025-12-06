@@ -26,8 +26,8 @@ export {
 } from "./embeddings";
 export type { MaterialChunkRecord } from "./embeddings";
 
+export type { LibraryAssetPayload } from "./ingest";
 export {
-  LibraryAssetPayload,
   buildLibraryAssetPayload,
   ingestStepTemplates,
   PREPROCESS_STEP_KINDS,
@@ -39,7 +39,6 @@ export {
   persistMaterialRawContent,
   buildLibraryEntryRecord,
   decodeDataUrl,
-  encodeDataUrlFromBytes,
   fetchRemoteBinary,
 } from "./ingest";
 
@@ -84,7 +83,7 @@ export type { ProxyResponseContext } from "./proxy";
 
 export { DEFAULT_GENERATION_TEMPERATURE, callOpenAiForGeneration, resolveOpenAiBaseUrl } from "./openai";
 
-export { summarizeText, joinChatContent } from "./utils";
+export { summarizeText, joinChatContent, encodeDataUrlFromBytes } from "./utils";
 
 export {
   createSession,
@@ -144,4 +143,5 @@ export {
   schemas,
   richContentDocumentSchema,
 } from "@theteacher/shared";
-export type { AppBindings, AppEnv, AuthContext } from "../core/types";
+export type { AppBindings, AppEnv } from "../core/types";
+export type { AuthContext } from "../core/auth";

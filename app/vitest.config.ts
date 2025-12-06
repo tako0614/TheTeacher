@@ -7,6 +7,11 @@ export default defineConfig({
     environment: "jsdom",
     globals: true,
     setupFiles: "./src/setupTests.ts",
+    poolOptions: {
+      threads: {
+        singleThread: true,
+      },
+    },
     coverage: {
       reporter: ["text", "lcov"],
     },

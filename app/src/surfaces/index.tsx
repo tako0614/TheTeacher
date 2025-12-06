@@ -32,6 +32,7 @@ import {
 } from "../lib/materials";
 import RichContentRenderer, { MathText } from "../components/rich-content/RichContentRenderer";
 import { getRichContentPreview } from "../lib/rich-content";
+import type { BillingPricing } from "../lib/types";
 
 import {
   type GeneratedSummary,
@@ -62,14 +63,18 @@ import {
   fetchLearning,
   fetchMaterial,
   fetchMaterialLibrary,
+  fetchIngestJobs,
   fetchMaterials,
   fetchSessions,
   fetchSnapshot,
   replaceSnapshot,
   requestTtsGeneration,
   updateLearning,
-  type SnapshotPayload,
+  fetchBillingPricing,
+  fetchBillingBalance,
+  createBillingCheckout,
 } from "../lib/api-client";
+import type { SnapshotPayload } from "../lib/types";
 import { buildBackupSnapshot, downloadSnapshot, parseSnapshotFile } from "../lib/backup";
 import { selectPresetOptions, useSettings } from "../lib/settings-store";
 import { useNewLearningDraft } from "../lib/new-learning-draft-store";
@@ -432,10 +437,13 @@ const LearningListSurface: Component = () => {
             学習一覧
           </p>
           <h1 class="text-2xl font-bold text-slate-900">
-            学習カードで進捗と生成物をざっと眺める
+            学習一覧
           </h1>
+          <p class="text-sm font-semibold text-slate-800">
+            学習カードで進捗と生成物をざっと眺める
+          </p>
           <p class="text-sm text-slate-600">
-            PLAN.mdのセクション3に合わせて、フィルタ・検索と詳細導線を先に整えました。バックエンドAPIに保存されたLearningをそのまま一覧化しています。
+            PLAN.mdのセクション3に合わせて、フィルタ・検索と詳細導線を先に整えました。バックエンドAPIに保存されたLearningを一覧化しています。
           </p>
         </div>
         <div class="flex gap-2">
@@ -848,6 +856,53 @@ const LearningDetailSurface: Component = () => {
     () => learning()?.id,
     (id) => (id ? fetchSessions(id).then((res) => res.items) : []),
   );
+  let ingestPollTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const clearIngestPollTimer = () => {
+    if (ingestPollTimer) {
+      clearTimeout(ingestPollTimer);
+      ingestPollTimer = undefined;
+    }
+  };
+
+  const scheduleIngestPoll = (delay: number) => {
+    clearIngestPollTimer();
+    ingestPollTimer = setTimeout(pollIngestQueue, delay);
+  };
+
+  const pollIngestQueue = async () => {
+    const learningId = learning()?.id;
+    if (!learningId) return;
+    const previousStatuses = new Map(ingestQueue().map((job) => [job.id, job.status]));
+    try {
+      const { items } = await fetchIngestJobs({ learningId, limit: 30 });
+      const newlyFinished = items.some((job) => {
+        const prev = previousStatuses.get(job.id);
+        return prev && prev !== job.status && (job.status === "completed" || job.status === "failed");
+      });
+      setIngestQueue(items);
+      if (newlyFinished) {
+        void refetchMaterials();
+      }
+      const hasPending = items.some((job) => job.status !== "completed" && job.status !== "failed");
+      scheduleIngestPoll(hasPending ? 4000 : 12000);
+    } catch (error) {
+      logger.warn("Failed to poll ingest jobs", "MaterialSurface", error);
+      scheduleIngestPoll(15000);
+    }
+  };
+
+  createEffect(() => {
+    const learningId = learning()?.id;
+    clearIngestPollTimer();
+    if (!learningId) {
+      setIngestQueue([]);
+      return;
+    }
+    scheduleIngestPoll(0);
+    onCleanup(() => clearIngestPollTimer());
+  });
+
   const formatBytes = (value?: number) =>
     value ? `${Math.round(value / 1024)} KB` : "サイズ不明";
 
@@ -5495,13 +5550,18 @@ const AppSettingsSurface: Component = () => {
   const toast = useToast();
   const defaultDeviceName =
     typeof navigator !== "undefined" ? navigator.userAgent.slice(0, 30) : "desktop";
-  const [email, setEmail] = createSignal(auth.state.user?.email ?? "");
   const [displayName, setDisplayName] = createSignal(auth.state.user?.displayName ?? "");
   const [deviceName, setDeviceName] = createSignal(defaultDeviceName);
+  const [pricing, setPricing] = createSignal<BillingPricing | null>(null);
+  const [credits, setCredits] = createSignal<number>(0);
+  const [purchaseQuantity, setPurchaseQuantity] = createSignal(1);
   const [accountMessage, setAccountMessage] = createSignal<string | null>(null);
   const [accountError, setAccountError] = createSignal<string | null>(null);
   const [isSavingProfile, setIsSavingProfile] = createSignal(false);
   const [isIssuingSession, setIsIssuingSession] = createSignal(false);
+  const [isLoadingBilling, setIsLoadingBilling] = createSignal(false);
+  const [isStartingCheckout, setIsStartingCheckout] = createSignal(false);
+  const [checkoutError, setCheckoutError] = createSignal<string | null>(null);
 
   const [backupMessage, setBackupMessage] = createSignal<string | null>(null);
   const [backupError, setBackupError] = createSignal<string | null>(null);
@@ -5510,11 +5570,34 @@ const AppSettingsSurface: Component = () => {
   let importInputRef: HTMLInputElement | undefined;
 
   const syncAuthFields = () => {
-    setEmail(auth.state.user?.email ?? "");
     setDisplayName(auth.state.user?.displayName ?? "");
   };
 
   createEffect(syncAuthFields);
+
+  const loadBilling = async () => {
+    if (auth.state.status !== "ready") return;
+    setIsLoadingBilling(true);
+    setCheckoutError(null);
+    try {
+      const [pricingResult, balanceResult] = await Promise.all([
+        fetchBillingPricing(),
+        fetchBillingBalance(),
+      ]);
+      setPricing(pricingResult);
+      setCredits(balanceResult.credits ?? 0);
+    } catch (error) {
+      setCheckoutError(error instanceof Error ? error.message : "課金情報の取得に失敗しました。");
+    } finally {
+      setIsLoadingBilling(false);
+    }
+  };
+
+  createEffect(() => {
+    if (auth.state.status === "ready") {
+      void loadBilling();
+    }
+  });
 
   const handleExport = async () => {
     setIsExporting(true);
@@ -5578,10 +5661,10 @@ const AppSettingsSurface: Component = () => {
   const saveProfile = async () => {
     setAccountError(null);
     setAccountMessage(null);
-    const emailValue = email().trim();
+    const emailValue = auth.state.user?.email?.trim();
     const displayNameValue = displayName().trim();
-    if (!emailValue && !displayNameValue) {
-      setAccountError("メールアドレスか表示名を入力してください。");
+    if (!emailValue) {
+      setAccountError("Googleサインイン後にプロフィールを更新できます。");
       return;
     }
     setIsSavingProfile(true);
@@ -5590,8 +5673,7 @@ const AppSettingsSurface: Component = () => {
         email: emailValue || undefined,
         displayName: displayNameValue || undefined,
       });
-      setAccountMessage("プロフィールを更新しました。別端末では同じメールでサインインしてください。");
-      setEmail(user.email ?? emailValue);
+      setAccountMessage("プロフィールを更新しました。");
       setDisplayName(user.displayName ?? displayNameValue);
     } catch (error) {
       setAccountError(
@@ -5602,30 +5684,50 @@ const AppSettingsSurface: Component = () => {
     }
   };
 
-  const signInWithEmail = async () => {
+  const handleGoogleSignIn = async () => {
     setAccountError(null);
     setAccountMessage(null);
-    const emailValue = email().trim();
-    if (!emailValue) {
-      setAccountError("サインインにはメールアドレスが必要です。");
-      return;
-    }
     setIsSavingProfile(true);
     try {
-      const response = await auth.signIn({
-        email: emailValue,
-        displayName: displayName().trim() || undefined,
-        deviceName: deviceName().trim() || undefined,
-      });
+      const response = await auth.signInWithGoogle();
       setAccountMessage(
-        `サインインしました: ${response.user.displayName ?? response.user.email ?? "user"}`,
+        `Googleでサインインしました: ${response.user.displayName ?? response.user.email ?? "user"}`,
       );
+      setDisplayName(response.user.displayName ?? "");
+      void loadBilling();
     } catch (error) {
       setAccountError(
-        error instanceof Error ? error.message : "サインインに失敗しました。",
+        error instanceof Error ? error.message : "Googleサインインに失敗しました。",
       );
     } finally {
       setIsSavingProfile(false);
+    }
+  };
+
+  const startCheckout = async (quantity = 1) => {
+    setCheckoutError(null);
+    setIsStartingCheckout(true);
+    try {
+      const origin =
+        typeof window !== "undefined" && window.location?.origin
+          ? window.location.origin
+          : "http://127.0.0.1:5173";
+      const response = await createBillingCheckout({
+        quantity,
+        successUrl: `${origin}/?billing=success`,
+        cancelUrl: `${origin}/?billing=cancel`,
+      });
+      if (response.url) {
+        window.location.href = response.url;
+      } else {
+        setCheckoutError("決済URLを取得できませんでした。");
+      }
+    } catch (error) {
+      setCheckoutError(
+        error instanceof Error ? error.message : "チェックアウトの開始に失敗しました。",
+      );
+    } finally {
+      setIsStartingCheckout(false);
     }
   };
 
@@ -5649,6 +5751,8 @@ const AppSettingsSurface: Component = () => {
 
   const signOut = () => {
     auth.signOut();
+    setCredits(0);
+    setPricing(null);
     setAccountMessage("ローカルのセッションをクリアしました。");
     setAccountError(null);
   };
@@ -5680,10 +5784,10 @@ const AppSettingsSurface: Component = () => {
               アカウント / マルチデバイス
             </p>
             <h2 class="text-lg font-bold text-slate-900">
-              メール登録とセッション発行で端末をまたいで同期
+              Googleでサインインして端末をまたいで同期
             </h2>
             <p class="text-sm text-slate-600">
-              まず現在のセッションにメールをひも付けてデータを保持し、その後は同じメールでサインインするとUser/UserSessionが共有されます。
+              Googleアカウントでサインインすると学習データがユーザーにひも付き、端末を変えても同じGoogleアカウントで継続できます。
             </p>
           </div>
           <div class="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-700">
@@ -5709,17 +5813,49 @@ const AppSettingsSurface: Component = () => {
         <div class="mt-4 grid gap-4 md:grid-cols-2">
           <div class="space-y-2">
             <p class="text-xs font-semibold text-slate-500">
-              現在のユーザーにメールを登録
+              Googleサインイン
             </p>
-            <label class="flex flex-col gap-1 text-sm">
-              <span class="text-xs font-semibold text-slate-600">メールアドレス</span>
-              <input
-                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
-                placeholder="you@example.com"
-                value={email()}
-                onInput={(event) => setEmail(event.currentTarget.value)}
-              />
-            </label>
+            <p class="text-sm text-slate-600">
+              Googleでサインインするとメールが自動で登録されます。表示名のみ手動で更新できます。
+            </p>
+            <div class="flex flex-wrap gap-2">
+              <button
+                class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-800 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                onClick={handleGoogleSignIn}
+                disabled={isAuthLoading()}
+              >
+                <svg class="h-4 w-4" viewBox="0 0 24 24" aria-hidden="true">
+                  <path
+                    fill="#4285F4"
+                    d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.06 2.53-2.26 3.31v2.75h3.64c2.13-1.97 3.36-4.87 3.36-8.07z"
+                  />
+                  <path
+                    fill="#34A853"
+                    d="M12 23c3.04 0 5.6-1.01 7.47-2.73l-3.64-2.75c-1.02.68-2.33 1.08-3.83 1.08-2.95 0-5.45-1.99-6.34-4.67H1.86v2.93C3.73 20.53 7.53 23 12 23z"
+                  />
+                  <path
+                    fill="#FBBC05"
+                    d="M5.66 13.93A7 7 0 0 1 5.3 12c0-.67.12-1.32.34-1.93V7.14H1.86A11 11 0 0 0 1 12c0 1.76.42 3.43 1.16 4.86l3.5-2.93z"
+                  />
+                  <path
+                    fill="#EA4335"
+                    d="M12 5.38c1.65 0 3.13.57 4.3 1.69l3.22-3.22C17.6 1.99 15.04 1 12 1 7.53 1 3.73 3.47 1.86 7.14l3.78 2.93C6.55 7.37 9.05 5.38 12 5.38z"
+                  />
+                </svg>
+                {isAuthLoading() ? "サインイン中..." : "Googleでサインイン"}
+              </button>
+              <button
+                class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                onClick={signOut}
+                disabled={isAuthLoading()}
+              >
+                サインアウト
+              </button>
+            </div>
+            <div class="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-700">
+              <p class="font-semibold text-slate-800">メール</p>
+              <p class="text-sm text-slate-900">{auth.state.user?.email ?? "未サインイン"}</p>
+            </div>
             <label class="flex flex-col gap-1 text-sm">
               <span class="text-xs font-semibold text-slate-600">表示名</span>
               <input
@@ -5735,24 +5871,17 @@ const AppSettingsSurface: Component = () => {
                 onClick={saveProfile}
                 disabled={isAuthLoading()}
               >
-                {isAuthLoading() ? "処理中..." : "メールを登録/更新"}
-              </button>
-              <button
-                class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
-                onClick={signOut}
-                disabled={isAuthLoading()}
-              >
-                サインアウト
+                {isAuthLoading() ? "処理中..." : "表示名を更新"}
               </button>
             </div>
             <p class="text-[11px] text-slate-500">
-              ここでメールを追加すると、現在の学習データを保持したまま他端末から同じメールでサインインできます。
+              Googleアカウントでサインインし、必要に応じて表示名を整えてください。
             </p>
           </div>
 
           <div class="space-y-2">
             <p class="text-xs font-semibold text-slate-500">
-              既存メールでサインイン / セッション再発行
+              セッション再発行
             </p>
             <label class="flex flex-col gap-1 text-sm">
               <span class="text-xs font-semibold text-slate-600">端末名</span>
@@ -5764,13 +5893,6 @@ const AppSettingsSurface: Component = () => {
               />
             </label>
             <div class="flex flex-wrap gap-2">
-              <button
-                class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
-                onClick={signInWithEmail}
-                disabled={isAuthLoading()}
-              >
-                {isAuthLoading() ? "処理中..." : "メールでサインイン/作成"}
-              </button>
               <button
                 class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
                 onClick={issueNewSession}
@@ -5798,6 +5920,88 @@ const AppSettingsSurface: Component = () => {
           <Show when={authError()}>
             <p class="text-xs text-rose-700">{authError()}</p>
           </Show>
+        </div>
+      </div>
+
+      <div class="rounded-xl border border-indigo-100 bg-indigo-50 p-4 shadow-sm">
+        <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <div class="space-y-1">
+            <p class="text-xs font-semibold uppercase text-indigo-600">
+              クレジット課金 (Stripe)
+            </p>
+            <h2 class="text-lg font-bold text-slate-900">
+              適正化価格でクレジットをまとめ買い
+            </h2>
+            <p class="text-sm text-slate-700">
+              生成やAPI呼び出しのコストをクレジットで前払いします。価格は安定したレートで提供しています。
+            </p>
+          </div>
+          <div class="rounded-lg bg-white px-3 py-2 text-sm text-slate-800 shadow-sm">
+            <p class="text-xs font-semibold text-slate-500">残高</p>
+            <p class="text-lg font-bold text-slate-900">{credits()} credits</p>
+            <Show when={pricing()}>
+              {(price) => (
+                <p class="text-[11px] text-slate-600">
+                  {price().effectiveCreditsPerPack} credits / {price().currency.toUpperCase()}{" "}
+                  {(price().unitAmount / 100).toFixed(2)}
+                </p>
+              )}
+            </Show>
+          </div>
+        </div>
+
+        <div class="mt-4 grid gap-3 md:grid-cols-[2fr_1fr]">
+          <div class="space-y-2">
+            <label class="flex flex-col gap-1 text-sm">
+              <span class="text-xs font-semibold text-slate-600">
+                購入パック数 (1-10)
+              </span>
+              <input
+                type="number"
+                min="1"
+                max="10"
+                class="w-32 rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                value={purchaseQuantity()}
+                onInput={(event) =>
+                  setPurchaseQuantity(
+                    Math.min(10, Math.max(1, Number(event.currentTarget.value) || 1)),
+                  )
+                }
+              />
+            </label>
+            <p class="text-xs text-slate-600">
+              1パック = {pricing()?.effectiveCreditsPerPack ?? 120} credits /{" "}
+              {pricing()?.currency?.toUpperCase() ?? "JPY"} {((pricing()?.unitAmount ?? 1200) / 100).toFixed(2)}。
+              クレジット単価が極端に下がらないよう調整しています。
+            </p>
+            <div class="flex flex-wrap gap-2 text-xs">
+              <button
+                class="rounded-lg bg-indigo-600 px-4 py-2 font-semibold text-white shadow-sm transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
+                onClick={() => startCheckout(purchaseQuantity())}
+                disabled={isStartingCheckout() || isLoadingBilling()}
+              >
+                {isStartingCheckout() ? "リダイレクト中..." : "Stripeで購入する"}
+              </button>
+              <button
+                class="rounded-lg border border-slate-200 px-3 py-2 font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                onClick={() => loadBilling()}
+                disabled={isLoadingBilling()}
+              >
+                {isLoadingBilling() ? "更新中..." : "残高を更新"}
+              </button>
+            </div>
+            <Show when={checkoutError()}>
+              {(msg) => <p class="text-xs text-rose-700">{msg()}</p>}
+            </Show>
+          </div>
+          <div class="rounded-lg border border-indigo-100 bg-white px-3 py-2 text-xs text-slate-700 shadow-sm">
+            <p class="font-semibold text-slate-900">適正化レートについて</p>
+            <ul class="mt-2 list-disc space-y-1 pl-4">
+              <li>OpenAI等のコスト変動を吸収しやすいよう一定レートで運用しています。</li>
+              <li>クレジットはモデル/生成/埋め込みで共通利用できます。</li>
+              <li>購入後すぐに残高へ反映されます（Stripe完了後）。</li>
+            </ul>
+          </div>
         </div>
       </div>
 

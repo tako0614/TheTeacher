@@ -62,7 +62,7 @@ export const ensureDefaultUser = async (db: D1Database) => {
   const user = await prisma.user.upsert({
     where: { id: DEFAULT_USER_ID },
     update: {},
-    create: { id: DEFAULT_USER_ID, displayName: DEFAULT_USER_DISPLAY_NAME },
+    create: { id: DEFAULT_USER_ID, displayName: DEFAULT_USER_DISPLAY_NAME, credits: 120 },
   });
   return mapUser(user as unknown as UserRow);
 };
@@ -75,6 +75,7 @@ export const createUser = async (db: D1Database, data: { email?: string; display
       id: crypto.randomUUID(),
       email: data.email,
       displayName: data.displayName,
+      credits: 120, // starter credits
     },
   });
   return mapUser(created as unknown as UserRow);
@@ -176,12 +177,18 @@ export const resolveAuthContext = async (
   };
 };
 
-export const publicPaths = new Set<string>(["/health", "/api/auth/anonymous"]);
+export const publicPaths = new Set<string>([
+  "/health",
+  "/api/auth/anonymous",
+  "/api/auth/google",
+  "/api/billing/webhook",
+]);
 
 export const fallbackUserContext = (): AuthContext => ({
   user: {
     id: DEFAULT_USER_ID,
     displayName: DEFAULT_USER_DISPLAY_NAME,
+    credits: 0,
     createdAt: nowIso(),
     updatedAt: nowIso(),
   },

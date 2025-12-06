@@ -1,4 +1,4 @@
-import type { AuthSessionResponse, BootstrapSessionRequest } from "@theteacher/shared";
+import type { AuthSessionResponse } from "@theteacher/shared";
 
 const STORAGE_KEY = "theteacher/session-token";
 
@@ -32,33 +32,40 @@ const buildDeviceName = (deviceName?: string) => {
 const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL?.replace(/\/+$/, "") ?? "http://127.0.0.1:8787";
 
-export const bootstrapSession = async (
-  input?: Partial<BootstrapSessionRequest>,
-): Promise<AuthSessionResponse> => {
+export const ensureSessionToken = async () => {
+  const existing = readSessionToken();
+  if (existing) return existing;
+  const apiToken = import.meta.env.VITE_API_TOKEN as string | undefined;
+  if (apiToken) return apiToken;
+  throw new Error("Googleログインが必要です");
+};
+
+export const bootstrapAnonymousSession = async (deviceName?: string) => {
   const res = await fetch(`${API_BASE_URL}/api/auth/anonymous`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      deviceName: buildDeviceName(input?.deviceName),
-      email: input?.email?.trim() || undefined,
-      displayName: input?.displayName?.trim() || undefined,
-    }),
+    body: JSON.stringify({ deviceName: buildDeviceName(deviceName) }),
   });
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
-    throw new Error(`Failed to bootstrap session: ${text}`);
+    throw new Error(`Failed to bootstrap anonymous session: ${text}`);
   }
   const json = (await res.json()) as AuthSessionResponse;
   persistSessionToken(json.token);
   return json;
 };
 
-export const ensureSessionToken = async () => {
-  const existing = readSessionToken();
-  if (existing) return existing;
-  const { token } = await bootstrapSession();
-  return token;
+export const exchangeGoogleIdToken = async (idToken: string, deviceName?: string) => {
+  const res = await fetch(`${API_BASE_URL}/api/auth/google`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ idToken, deviceName: buildDeviceName(deviceName) }),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => res.statusText);
+    throw new Error(`Googleログインに失敗しました: ${text}`);
+  }
+  const json = (await res.json()) as AuthSessionResponse;
+  persistSessionToken(json.token);
+  return json;
 };
-
-export const bootstrapAnonymousSession = (deviceName?: string) =>
-  bootstrapSession({ deviceName });

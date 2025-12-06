@@ -6,7 +6,7 @@ import type {
   PracticeGradingRequest,
   PracticeGradingResponse,
 } from "@theteacher/shared";
-import { schemas } from "@theteacher/shared";
+import { googleLoginRequestSchema, schemas } from "@theteacher/shared";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { GeneratedContentRow, MaterialRow, PracticeSessionRow, PresetRow } from "./db";
 import {
@@ -105,6 +105,24 @@ import {
 } from "./api-core";
 import type { ProxyResponseContext, SemanticMatch } from "./api-core";
 import { enqueueTtsJob } from "./api/tts";
+import { verifyGoogleIdToken } from "./core/google-auth";
+import {
+  addUserCredits,
+  createStripeCheckoutSession,
+  creditsForCheckout,
+  getUserCredits,
+  resolvePricing,
+  consumeUserCredits,
+  verifyStripeSignature,
+} from "./core/billing";
+
+const CREDIT_COST = {
+  embed: 1,
+  semanticSearch: 1,
+  proxyChat: 3,
+  generation: 5,
+  practiceGrade: 1,
+};
 
 app.get("/health", (c) => {
   return c.json({ status: "ok" });
@@ -172,6 +190,138 @@ app.post("/api/auth/sessions", async (c) => {
   }
   const { session, token } = await createSession(db, auth.user.id, parsed.data.deviceName);
   return c.json(authSessionResponseSchema.parse({ user: auth.user, session, token }), 201);
+});
+
+app.post("/api/auth/google", async (c) => {
+  const db = c.env.DB;
+  if (!db) return c.json({ error: "db_not_configured" }, 503);
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = googleLoginRequestSchema.safeParse(body ?? {});
+  if (!parsed.success) {
+    return c.json({ error: "invalid_request", issues: parsed.error.format() }, 400);
+  }
+  const clientId = c.env.GOOGLE_CLIENT_ID?.trim();
+  if (!clientId) {
+    return c.json({ error: "google_client_id_missing", message: "GOOGLE_CLIENT_ID is not configured" }, 503);
+  }
+
+  try {
+    const profile = await verifyGoogleIdToken(parsed.data.idToken, clientId);
+    const email = profile.email?.trim();
+    if (!email) {
+      return c.json({ error: "email_required", message: "Googleアカウントのメールアドレスが取得できませんでした" }, 400);
+    }
+    await ensureUserTables(db);
+    let user = await fetchUserByEmail(db, email);
+    if (!user) {
+      user = await createUser(db, {
+        email,
+        displayName: profile.name ?? email,
+      });
+    } else if (!user.displayName && profile.name) {
+      user = await updateUserProfile(db, user.id, { displayName: profile.name });
+    }
+    const { session, token } = await createSession(
+      db,
+      user.id,
+      parsed.data.deviceName ?? "google",
+    );
+    return c.json(authSessionResponseSchema.parse({ user, session, token }), 201);
+  } catch (error) {
+    const status =
+      error instanceof ToolCallError && error.status ? (error.status as ContentfulStatusCode) : 401;
+    const message = error instanceof Error ? error.message : "invalid_google_token";
+    return c.json({ error: "invalid_google_token", message }, status);
+  }
+});
+
+app.get("/api/billing/pricing", (c) => {
+  const pricing = resolvePricing(c.env);
+  return c.json({ pricing });
+});
+
+app.get("/api/billing/balance", async (c) => {
+  const { user } = requireAuth(c);
+  const db = c.env.DB;
+  if (!db) return c.json({ error: "db_not_configured" }, 503);
+  const credits = await getUserCredits(db, user.id);
+  return c.json({ credits });
+});
+
+app.post("/api/billing/checkout", async (c) => {
+  const { user } = requireAuth(c);
+  const db = c.env.DB;
+  if (!db) return c.json({ error: "db_not_configured" }, 503);
+  const body = await c.req.json().catch(() => ({}));
+  const quantity = Number(body?.quantity ?? 1);
+  const successUrl = typeof body?.successUrl === "string" ? body.successUrl : undefined;
+  const cancelUrl = typeof body?.cancelUrl === "string" ? body.cancelUrl : undefined;
+  if (!successUrl || !cancelUrl) {
+    return c.json({ error: "invalid_request", message: "successUrl and cancelUrl are required" }, 400);
+  }
+  try {
+    const session = await createStripeCheckoutSession(c.env, {
+      quantity,
+      userId: user.id,
+      successUrl,
+      cancelUrl,
+    });
+    return c.json({ url: session.url, sessionId: session.id });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "failed to create checkout session";
+    return c.json({ error: "stripe_error", message }, 500);
+  }
+});
+
+app.post("/api/billing/webhook", async (c) => {
+  const secret = c.env.STRIPE_WEBHOOK_SECRET;
+  const db = c.env.DB;
+  if (!secret || !db) return c.json({ error: "webhook_not_configured" }, 503);
+
+  const signature = c.req.header("stripe-signature");
+  const rawBody = await c.req.raw.clone().arrayBuffer();
+  const verified = await verifyStripeSignature(secret, signature ?? null, rawBody);
+  if (!verified) {
+    return c.json({ error: "invalid_signature" }, 400);
+  }
+
+  const event = (await c.req.json().catch(() => null)) as {
+    type?: string;
+    data?: { object?: Record<string, unknown> };
+  } | null;
+  if (!event?.type) return c.json({ ok: true });
+
+  if (event.type === "checkout.session.completed") {
+    const session = event.data?.object ?? {};
+    const metadata = (session as { metadata?: Record<string, unknown> }).metadata ?? {};
+    const userId =
+      (metadata.userId as string | undefined) ??
+      ((session as { client_reference_id?: string }).client_reference_id as string | undefined);
+    const quantity =
+      typeof metadata.quantity === "string"
+        ? Number(metadata.quantity)
+        : typeof metadata.quantity === "number"
+          ? Number(metadata.quantity)
+          : Number((session as { amount_total?: number }).amount_total) > 0
+            ? Math.max(
+                1,
+                Math.round(
+                  ((session as { amount_total?: number }).amount_total as number) /
+                    resolvePricing(c.env).unitAmount,
+                ),
+              )
+            : 1;
+    if (userId) {
+      const packs = Number.isFinite(quantity) ? Math.max(1, Number(quantity)) : 1;
+      const amountTotal = (session as { amount_total?: number }).amount_total;
+      const unitAmountFromStripe =
+        typeof amountTotal === "number" && packs > 0 ? Math.floor(amountTotal / packs) : undefined;
+      const added = creditsForCheckout(packs, c.env, unitAmountFromStripe);
+      await addUserCredits(db, userId, added);
+    }
+  }
+
+  return c.json({ ok: true });
 });
 
 app.get("/api/learnings", async (c) => {
@@ -751,6 +901,8 @@ app.delete("/api/contents/:id", async (c) => {
 
 app.post("/api/generate/from-material", async (c) => {
   const { user } = requireAuth(c);
+  const db = c.env.DB;
+  if (!db) return c.json({ error: "db_not_configured" }, 503);
   const body = await c.req.json().catch(() => null);
   const parsed = generateFromMaterialRequestSchema.safeParse(body);
   if (!parsed.success) {
@@ -758,18 +910,25 @@ app.post("/api/generate/from-material", async (c) => {
   }
 
   const request = parsed.data;
-  const learning = await fetchLearning(c.env.DB, request.learningId, user.id);
+  try {
+    await consumeUserCredits(db, user.id, CREDIT_COST.generation);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "insufficient_credits";
+    return c.json({ error: "insufficient_credits", message }, 402);
+  }
+
+  const learning = await fetchLearning(db, request.learningId, user.id);
   if (!learning) return c.json({ error: "learning_not_found" }, 404);
 
   try {
     const { material } = await resolveMaterialForGeneration(
-      c.env.DB,
+      db,
       c.env,
       request,
       learning,
       user.id,
     );
-    const preset = await resolvePresetContext(c.env.DB, request, user.id);
+    const preset = await resolvePresetContext(db, request, user.id);
     const { drafts, meta } = await generateContentsFromMaterial(
       c.env,
       request,
@@ -779,7 +938,7 @@ app.post("/api/generate/from-material", async (c) => {
     );
     const items: GeneratedContent[] = [];
     for (const draft of drafts) {
-      items.push(await saveGeneratedContent(c.env.DB, { ...draft, userId: user.id }, user.id, c.env));
+      items.push(await saveGeneratedContent(db, { ...draft, userId: user.id }, user.id, c.env));
     }
     const job = buildGenerationJob(request.types, preset, {
       modelName: meta.modelName,
@@ -976,6 +1135,9 @@ app.delete("/api/presets/:id", async (c) => {
 });
 
 app.post("/ai/embed", async (c) => {
+  const { user } = requireAuth(c);
+  const db = c.env.DB;
+  if (!db) return c.json({ error: "db_not_configured" }, 503);
   const body = await c.req.json().catch(() => null);
   const parsed = embedRequestSchema.safeParse(body);
 
@@ -983,9 +1145,17 @@ app.post("/ai/embed", async (c) => {
     return c.json({ error: "invalid_request", issues: parsed.error.format() }, 400);
   }
 
+  try {
+    await consumeUserCredits(db, user.id, CREDIT_COST.embed);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "insufficient_credits";
+    return c.json({ error: "insufficient_credits", message }, 402);
+  }
+
   const { embeddings, dimension, model, provider } = await generateEmbeddings(
     parsed.data.texts,
     c.env,
+    { allowFallback: !c.env?.OPENAI_API_KEY?.trim() },
   );
   return c.json({
     dimension,
@@ -1037,6 +1207,9 @@ app.post("/ai/tools", async (c) => {
 });
 
 app.post("/ai/practice/grade", async (c) => {
+  const { user } = requireAuth(c);
+  const db = c.env.DB;
+  if (!db) return c.json({ error: "db_not_configured" }, 503);
   const body = await c.req.json().catch(() => null);
   const parsed = practiceGradingRequestSchema.safeParse(body);
   if (!parsed.success) {
@@ -1047,6 +1220,13 @@ app.post("/ai/practice/grade", async (c) => {
     ...parsed.data,
     mode: parsed.data.mode ?? "text",
   };
+
+  try {
+    await consumeUserCredits(db, user.id, CREDIT_COST.practiceGrade);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "insufficient_credits";
+    return c.json({ error: "insufficient_credits", message }, 402);
+  }
 
   const fallback = buildFallbackFeedback(request);
   let feedback = fallback;
@@ -1073,6 +1253,8 @@ app.post("/ai/practice/grade", async (c) => {
 
 app.post("/ai/proxy", async (c) => {
   const { user } = requireAuth(c);
+  const db = c.env.DB;
+  if (!db) return c.json({ error: "db_not_configured" }, 503);
   const body = await c.req.json().catch(() => null);
   const parsed = proxyRequestSchema.safeParse(body);
 
@@ -1084,6 +1266,13 @@ app.post("/ai/proxy", async (c) => {
       },
       400,
     );
+  }
+
+  try {
+    await consumeUserCredits(db, user.id, CREDIT_COST.proxyChat);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "insufficient_credits";
+    return c.json({ error: "insufficient_credits", message }, 402);
   }
 
   const prompt = parsed.data.prompt.trim();
@@ -1267,4 +1456,5 @@ export const __ingestTestHelpers = {
   prepareJobForProcessing,
 };
 
+export { app };
 export default app;

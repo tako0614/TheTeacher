@@ -1,5 +1,5 @@
 import type { D1Database } from "@cloudflare/workers-types";
-import { D1Adapter } from "@prisma/adapter-d1";
+import { PrismaD1 } from "@prisma/adapter-d1";
 import { PrismaClient } from "@prisma/client/edge";
 import { prismaMigrations } from "../prisma-migrations";
 
@@ -97,7 +97,7 @@ const applyPrismaMigrations = async (prisma: PrismaClient) => {
 export const getPrismaClient = (db: D1Database) => {
   let client = prismaClientCache.get(db);
   if (!client) {
-    const adapter = new D1Adapter(db);
+    const adapter = new PrismaD1(db);
     client = new PrismaClient({ adapter });
     prismaClientCache.set(db, client);
   }

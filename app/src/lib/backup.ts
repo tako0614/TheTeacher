@@ -6,7 +6,7 @@ import {
   backupSnapshotSchema,
 } from "@theteacher/shared";
 
-import { type SnapshotPayload } from "./api-client";
+import { type SnapshotPayload } from "./types";
 
 export const buildBackupSnapshot = (
   db: SnapshotPayload | LocalDbSnapshot,

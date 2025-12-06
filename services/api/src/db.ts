@@ -119,6 +119,7 @@ export interface UserRow {
   id: string;
   email?: string | null;
   displayName?: string | null;
+  credits?: number | null;
   createdAt: string | Date;
   updatedAt: string | Date;
   lastSeenAt?: string | Date | null;
@@ -196,6 +197,7 @@ export const mapUser = (row: UserRow) => ({
   id: row.id,
   email: row.email ?? undefined,
   displayName: row.displayName ?? undefined,
+  credits: typeof row.credits === "number" ? row.credits : 0,
   createdAt: typeof row.createdAt === "string" ? row.createdAt : row.createdAt.toISOString(),
   updatedAt: typeof row.updatedAt === "string" ? row.updatedAt : row.updatedAt.toISOString(),
   lastSeenAt:

@@ -9,8 +9,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "lint": "eslint . --ext .ts,.tsx",
-    "test": "vitest run",
-    "test:watch": "vitest",
+    "test": "vitest run --pool=threads --poolOptions.threads.singleThread",
+    "test:watch": "vitest --pool=threads --poolOptions.threads.singleThread",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

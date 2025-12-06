@@ -138,9 +138,12 @@ const attachEmbeddingsToSemanticDrafts = async (
   env?: AppBindings,
 ): Promise<SemanticNodeDraft[]> => {
   if (drafts.length === 0) return [];
+  const hasOpenAiKey = Boolean(env?.OPENAI_API_KEY?.trim());
+  const allowFallback = !hasOpenAiKey;
   const { embeddings, dimension } = await generateEmbeddings(
     drafts.map((draft) => draft.embeddingText),
     env,
+    { allowFallback },
   );
   return drafts.map((draft, index) => ({
     id: draft.id,
@@ -727,7 +730,13 @@ export const searchSemantic = async (
   userId: string = DEFAULT_USER_ID,
 ): Promise<SemanticMatch[]> => {
   const index = await buildSemanticIndex(db, env, userId);
-  const { embeddings: queryEmbeddings, dimension } = await generateEmbeddings([query], env);
+  const hasOpenAiKey = Boolean(env?.OPENAI_API_KEY?.trim());
+  const allowFallback = !hasOpenAiKey;
+  const { embeddings: queryEmbeddings, dimension } = await generateEmbeddings(
+    [query],
+    env,
+    { allowFallback },
+  );
   const queryVector = queryEmbeddings[0] ?? toEmbedding(query, dimension);
 
   const matches = index

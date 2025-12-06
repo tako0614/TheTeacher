@@ -18,7 +18,7 @@ app.use("*", async (c, next) => {
   const path = new URL(c.req.url).pathname;
   if (publicPaths.has(path)) return next();
 
-  const db = c.env.DB;
+  const db = c.env?.DB;
   if (!db) {
     c.set("auth", fallbackUserContext());
     return next();

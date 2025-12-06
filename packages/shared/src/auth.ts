@@ -10,6 +10,11 @@ export const bootstrapSessionRequestSchema = z.object({
   displayName: z.string().min(1).optional(),
 });
 
+export const googleLoginRequestSchema = z.object({
+  idToken: z.string().min(10, "idToken is required"),
+  deviceName: z.string().trim().min(1).optional(),
+});
+
 export const issueSessionRequestSchema = z.object({
   deviceName: z.string().trim().min(1).optional(),
 });
@@ -27,5 +32,6 @@ export const authSessionResponseSchema = z.object({
 
 export type AuthSessionResponse = z.infer<typeof authSessionResponseSchema>;
 export type BootstrapSessionRequest = z.infer<typeof bootstrapSessionRequestSchema>;
+export type GoogleLoginRequest = z.infer<typeof googleLoginRequestSchema>;
 export type IssueSessionRequest = z.infer<typeof issueSessionRequestSchema>;
 export type UpdateUserProfileRequest = z.infer<typeof updateUserProfileRequestSchema>;
