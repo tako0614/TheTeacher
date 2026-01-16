@@ -1,5 +1,6 @@
 import type { Prisma } from "@prisma/client/edge";
 import type { D1Database } from "@cloudflare/workers-types";
+import type { VectorizeVector, VectorizeVectorMetadata } from "@cloudflare/workers-types";
 import type {
   GenerateFromMaterialRequest,
   GeneratedContent,
@@ -22,6 +23,12 @@ import type { AppBindings } from "../core/types";
 import { generateEmbeddings, toEmbedding, cosineSimilarity } from "./embeddings";
 import { mapGeneratedContent, mapMaterial, mapPracticeSession } from "./data";
 import { summarizeText } from "./utils";
+import {
+  asVectorizeBinding,
+  deleteVectorizeByIds,
+  ensureVectorDimensions,
+  resolveExpectedVectorDimensions,
+} from "./vectorize";
 
 const asRecord = (value: unknown): Record<string, unknown> | undefined => {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
@@ -133,6 +140,50 @@ const toSemanticNodeWithMeta = (
   subject: draft.subject,
 });
 
+const toVectorizeMetadataValue = (value: unknown): VectorizeVectorMetadata | undefined => {
+  if (value === null) return null;
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
+  if (Array.isArray(value) && value.every((item) => typeof item === "string")) return value;
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const next: Record<string, string | number | boolean | string[]> = {};
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      if (typeof entry === "string" || typeof entry === "number" || typeof entry === "boolean") {
+        next[key] = entry;
+      } else if (Array.isArray(entry) && entry.every((item) => typeof item === "string")) {
+        next[key] = entry;
+      }
+    }
+    if (Object.keys(next).length > 0) return next;
+  }
+  return undefined;
+};
+
+const buildVectorizeVector = (draft: SemanticNodeDraft): VectorizeVector => {
+  const id = draft.id ?? semanticNodeId(draft.refType, draft.refId);
+  const metadata: Record<string, VectorizeVectorMetadata> = {
+    kind: "semantic_node",
+    userId: draft.userId,
+    refType: draft.refType,
+    refId: draft.refId,
+    label: draft.label,
+    excerpt: draft.excerpt,
+    ...(draft.subject ? { subject: draft.subject } : {}),
+  };
+  const extra = toVectorizeMetadataValue(draft.metadata);
+  if (extra && typeof extra === "object" && !Array.isArray(extra)) {
+    metadata.extra = extra;
+  }
+  return { id, values: draft.embedding, metadata };
+};
+
+const upsertVectorizeNode = async (env: AppBindings | undefined, draft: SemanticNodeDraft) => {
+  const vectorize = asVectorizeBinding(env?.VECTORIZE);
+  if (!vectorize) return;
+  const expected = resolveExpectedVectorDimensions(env);
+  ensureVectorDimensions(draft.embedding, expected);
+  await vectorize.upsert([buildVectorizeVector(draft)]);
+};
+
 const attachEmbeddingsToSemanticDrafts = async (
   drafts: SemanticNodeDraftInput[],
   env?: AppBindings,
@@ -160,10 +211,12 @@ const attachEmbeddingsToSemanticDrafts = async (
 
 const persistSemanticNode = async (
   db: D1Database | undefined,
+  env: AppBindings | undefined,
   draft: SemanticNodeDraft,
 ) => {
-  if (!db) return;
   const id = draft.id ?? semanticNodeId(draft.refType, draft.refId);
+  await upsertVectorizeNode(env, { ...draft, id });
+  if (!db) return;
   await ensureCoreTables(db);
   const prisma = getPrismaClient(db);
   const metadata = {
@@ -192,21 +245,29 @@ const persistSemanticNode = async (
   });
 };
 
-const persistSemanticNodes = async (db: D1Database | undefined, drafts: SemanticNodeDraft[]) => {
-  if (!db || drafts.length === 0) return;
+const persistSemanticNodes = async (
+  db: D1Database | undefined,
+  env: AppBindings | undefined,
+  drafts: SemanticNodeDraft[],
+) => {
+  if (drafts.length === 0) return;
   for (const draft of drafts) {
-    await persistSemanticNode(db, draft);
+    await persistSemanticNode(db, env, draft);
   }
 };
 
 export const deleteSemanticNodesByRef = async (
   db: D1Database | undefined,
+  env: AppBindings | undefined,
   refType: SemanticNode["refType"],
   refIds: string[],
   userId?: string,
 ) => {
-  if (!db || refIds.length === 0) return;
+  if (refIds.length === 0) return;
   const uniqueIds = Array.from(new Set(refIds));
+  const vectorIds = uniqueIds.map((refId) => semanticNodeId(refType, refId));
+  await deleteVectorizeByIds(env, vectorIds);
+  if (!db) return;
   await ensureCoreTables(db);
   const prisma = getPrismaClient(db);
   await prisma.semanticNode.deleteMany({
@@ -430,7 +491,7 @@ export const indexLearningSemanticNode = async (
     env,
   );
   if (drafts[0]) {
-    await persistSemanticNode(db, drafts[0]);
+    await persistSemanticNode(db, env, drafts[0]);
   }
 };
 
@@ -445,7 +506,7 @@ export const indexMaterialSemanticNode = async (
     env,
   );
   if (drafts[0]) {
-    await persistSemanticNode(db, drafts[0]);
+    await persistSemanticNode(db, env, drafts[0]);
   }
 };
 
@@ -460,7 +521,7 @@ export const indexGeneratedContentSemanticNode = async (
     env,
   );
   if (drafts[0]) {
-    await persistSemanticNode(db, drafts[0]);
+    await persistSemanticNode(db, env, drafts[0]);
   }
 };
 
@@ -475,7 +536,7 @@ export const indexPracticeQuestionSemanticNode = async (
     env,
   );
   if (drafts[0]) {
-    await persistSemanticNode(db, drafts[0]);
+    await persistSemanticNode(db, env, drafts[0]);
   }
 };
 
@@ -702,6 +763,7 @@ const buildSemanticIndex = async (
   if (regenerated.length > 0) {
     await persistSemanticNodes(
       db,
+      env,
       regenerated.map(
         (node): SemanticNodeDraft => ({
           id: node.id,
@@ -721,6 +783,71 @@ const buildSemanticIndex = async (
   return fallbackSemanticNodes(userId);
 };
 
+const vectorizeMetadataString = (metadata: Record<string, VectorizeVectorMetadata> | undefined, key: string) => {
+  const value = metadata?.[key];
+  if (typeof value === "string") return value;
+  return undefined;
+};
+
+const vectorizeMetadataRefType = (metadata: Record<string, VectorizeVectorMetadata> | undefined) => {
+  const value = metadata?.refType;
+  if (value === "learning" || value === "material" || value === "generated_content" || value === "question") {
+    return value;
+  }
+  return undefined;
+};
+
+const searchSemanticWithVectorize = async (
+  env: AppBindings,
+  queryVector: number[],
+  topK: number,
+  filters: Partial<Pick<SemanticNodeWithMeta, "refType" | "subject">> | undefined,
+  userId: string,
+): Promise<SemanticMatch[]> => {
+  const vectorize = asVectorizeBinding(env.VECTORIZE);
+  if (!vectorize) return [];
+  const expected = resolveExpectedVectorDimensions(env);
+  ensureVectorDimensions(queryVector, expected);
+
+  const filter: Record<string, unknown> = { kind: "semantic_node", userId };
+  if (filters?.refType) filter.refType = filters.refType;
+  if (filters?.subject) filter.subject = filters.subject;
+
+  const result = await vectorize.query(queryVector, {
+    topK,
+    returnValues: true,
+    returnMetadata: "all",
+    filter: filter as never,
+  });
+
+  return (result.matches ?? [])
+    .map((match) => {
+      const metadata = match.metadata as Record<string, VectorizeVectorMetadata> | undefined;
+      const label = vectorizeMetadataString(metadata, "label") ?? match.id;
+      const excerpt = vectorizeMetadataString(metadata, "excerpt") ?? "";
+      const subject = vectorizeMetadataString(metadata, "subject");
+      const refType = vectorizeMetadataRefType(metadata);
+      const refId = vectorizeMetadataString(metadata, "refId") ?? match.id;
+      const embedding = Array.isArray(match.values) ? match.values.map((v) => Number(v) || 0) : [];
+      if (!refType) return null;
+      return {
+        id: match.id,
+        userId,
+        refType,
+        refId,
+        label,
+        excerpt,
+        subject,
+        metadata: undefined,
+        score: Number(match.score ?? 0),
+        embedding,
+      } satisfies SemanticMatch;
+    })
+    .filter((value): value is SemanticMatch => Boolean(value))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, topK);
+};
+
 export const searchSemantic = async (
   db: D1Database | undefined,
   env: AppBindings | undefined,
@@ -729,14 +856,25 @@ export const searchSemantic = async (
   filters?: Partial<Pick<SemanticNodeWithMeta, "refType" | "subject">>,
   userId: string = DEFAULT_USER_ID,
 ): Promise<SemanticMatch[]> => {
-  const index = await buildSemanticIndex(db, env, userId);
   const hasOpenAiKey = Boolean(env?.OPENAI_API_KEY?.trim());
+  const vectorizeEnabled = Boolean(env?.VECTORIZE && hasOpenAiKey);
+
+  if (env && vectorizeEnabled) {
+    try {
+      const { embeddings: queryEmbeddings, dimension } = await generateEmbeddings([query], env, {
+        allowFallback: false,
+      });
+      const queryVector = queryEmbeddings[0] ?? toEmbedding(query, dimension);
+      const matches = await searchSemanticWithVectorize(env, queryVector, topK, filters, userId);
+      if (matches.length > 0) return matches;
+    } catch (error) {
+      console.warn("Vectorize semantic search failed; falling back to D1 scan", error);
+    }
+  }
+
+  const index = await buildSemanticIndex(db, env, userId);
   const allowFallback = !hasOpenAiKey;
-  const { embeddings: queryEmbeddings, dimension } = await generateEmbeddings(
-    [query],
-    env,
-    { allowFallback },
-  );
+  const { embeddings: queryEmbeddings, dimension } = await generateEmbeddings([query], env, { allowFallback });
   const queryVector = queryEmbeddings[0] ?? toEmbedding(query, dimension);
 
   const matches = index
@@ -756,6 +894,40 @@ export const searchSemantic = async (
     ...match,
     embedding: match.embedding.slice(),
   }));
+};
+
+export const syncSemanticIndexToVectorize = async (
+  db: D1Database | undefined,
+  env: AppBindings | undefined,
+  userId: string,
+): Promise<{ upserted: number }> => {
+  const vectorize = asVectorize(env?.VECTORIZE);
+  if (!vectorize) return { upserted: 0 };
+  if (!env?.OPENAI_API_KEY?.trim()) {
+    throw new Error("OPENAI_API_KEY is required to sync Vectorize index");
+  }
+  const expected = resolveExpectedVectorDimensions(env);
+  const nodes = await buildSemanticIndex(db, env, userId);
+  const vectors = nodes.map((node) => {
+    ensureVectorDimensions(node.embedding, expected);
+    return buildVectorizeVector({
+      id: node.id,
+      userId,
+      refType: node.refType,
+      refId: node.refId,
+      embedding: node.embedding,
+      label: node.label,
+      excerpt: node.excerpt,
+      subject: node.subject,
+      metadata: (node.metadata as Record<string, unknown> | undefined) ?? undefined,
+    });
+  });
+
+  const batchSize = 50;
+  for (let i = 0; i < vectors.length; i += batchSize) {
+    await vectorize.upsert(vectors.slice(i, i + batchSize));
+  }
+  return { upserted: vectors.length };
 };
 
 export type SerializedMatch = Pick<SemanticMatch, "id" | "label" | "excerpt" | "score" | "refType" | "subject">;

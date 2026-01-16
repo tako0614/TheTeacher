@@ -32,7 +32,6 @@ import {
 } from "../lib/materials";
 import RichContentRenderer, { MathText } from "../components/rich-content/RichContentRenderer";
 import { getRichContentPreview } from "../lib/rich-content";
-import type { BillingPricing } from "../lib/types";
 
 import {
   type GeneratedSummary,
@@ -70,15 +69,13 @@ import {
   replaceSnapshot,
   requestTtsGeneration,
   updateLearning,
-  fetchBillingPricing,
-  fetchBillingBalance,
-  createBillingCheckout,
 } from "../lib/api-client";
 import type { SnapshotPayload } from "../lib/types";
 import { buildBackupSnapshot, downloadSnapshot, parseSnapshotFile } from "../lib/backup";
 import { selectPresetOptions, useSettings } from "../lib/settings-store";
 import { useNewLearningDraft } from "../lib/new-learning-draft-store";
 import { processMaterialFile } from "../lib/file-processing";
+import { uploadFileToLibrary } from "../lib/library-upload";
 import { gradePracticeAnswer } from "../lib/practice";
 import PresetManagementSurface from "./PresetManagementSurface";
 import RelatedContent from "../components/RelatedContent";
@@ -803,6 +800,7 @@ const LearningDetailSurface: Component = () => {
   const [materialText, setMaterialText] = createSignal("");
   const [materialFileName, setMaterialFileName] = createSignal("");
   const [materialBytes, setMaterialBytes] = createSignal<number | undefined>();
+  const [materialFile, setMaterialFile] = createSignal<File | undefined>();
   const [materialPayload, setMaterialPayload] =
     createSignal<MaterialIngestRequest["payload"]>();
   const [saveMessage, setSaveMessage] = createSignal<string | null>(null);
@@ -960,6 +958,7 @@ const LearningDetailSurface: Component = () => {
     setMaterialPayload(undefined);
     setMaterialFileName("");
     setMaterialBytes(undefined);
+    setMaterialFile(undefined);
   });
 
   createEffect(() => {
@@ -995,6 +994,7 @@ const LearningDetailSurface: Component = () => {
     const config = libraryConfig();
     if (!target || !config) return;
 
+    const preset = materialIngestPresets.find((item) => item.id === ingestPresetId());
     const textContent = materialText().trim();
     let payload: MaterialIngestRequest["payload"] | undefined;
 
@@ -1011,6 +1011,26 @@ const LearningDetailSurface: Component = () => {
       };
     } else {
       payload = materialPayload();
+    }
+
+    const localFile = materialFile();
+    if (localFile && materialType() !== "text" && materialType() !== "url") {
+      const needsBinaryUpload = !payload?.dataUrl && !payload?.libraryEntryId;
+      if (needsBinaryUpload) {
+        try {
+          const uploaded = await uploadFileToLibrary(localFile);
+          payload = { ...payload, ...uploaded.payload };
+        } catch (error) {
+          const errorMsg =
+            error instanceof Error
+              ? `ファイルのアップロードに失敗しました: ${error.message}`
+              : "ファイルのアップロードに失敗しました。";
+          setSaveMessage(errorMsg);
+          toast.showToast(errorMsg, "error");
+          logger.error("Failed to upload material file", "MaterialSurface", error);
+          return;
+        }
+      }
     }
 
     const urlValue = materialFileName().trim() || materialSource();
@@ -1049,6 +1069,8 @@ const LearningDetailSurface: Component = () => {
         learningId: target.id,
         source,
         preferOffline,
+        ocrEngine: preset?.request.ocrEngine,
+        transcriptionEngine: preset?.request.transcriptionEngine,
         payload,
       });
       setIngestQueue((prev) => [result.job, ...prev]);
@@ -1060,6 +1082,7 @@ const LearningDetailSurface: Component = () => {
       }
       setMaterialFileName("");
       setMaterialBytes(undefined);
+      setMaterialFile(undefined);
       setMaterialPayload(undefined);
       await refetchMaterials();
       const successMsg = `教材(${result.material.type})を保存し、抽出テキストを反映しました。`;
@@ -1082,11 +1105,13 @@ const LearningDetailSurface: Component = () => {
     if (!file) {
       setMaterialFileName("");
       setMaterialBytes(undefined);
+      setMaterialFile(undefined);
       setMaterialPayload(undefined);
       return;
     }
     setMaterialFileName(file.name);
     setMaterialBytes(file.size);
+    setMaterialFile(file);
 
     // ファイルの種類を自動検出して設定
     const detectedType = detectMaterialTypeFromFile(file);
@@ -1121,6 +1146,7 @@ const LearningDetailSurface: Component = () => {
       logger.error("Failed to process file", "MaterialSurface", error);
       setMaterialPayload(undefined);
       setMaterialText("");
+      setMaterialFile(undefined);
       const errorMsg = "ファイル処理に失敗しました。テキストを手入力してください。";
       setSaveMessage(errorMsg);
       toast.showToast(errorMsg, "error");
@@ -4096,13 +4122,17 @@ const MaterialSettingsSurface: Component = () => {
       const type = detectMaterialType(file);
       const processed = await processMaterialFile(file, type);
       const preferOffline = shouldPreferOffline(type);
-      const payload: MaterialIngestRequest["payload"] = {
+      let payload: MaterialIngestRequest["payload"] = {
         text: processed.text,
         dataUrl: processed.dataUrl,
         fileName: processed.fileName,
         bytes: processed.bytes,
         mimeType: processed.mimeType,
       };
+      if (type !== "text" && type !== "url" && !payload.dataUrl && !payload.libraryEntryId) {
+        const uploaded = await uploadFileToLibrary(file);
+        payload = { ...payload, ...uploaded.payload };
+      }
       const source: MaterialIngestRequest["source"] =
         type === "text"
           ? { kind: "text", text: processed.text ?? file.name }
@@ -4111,6 +4141,8 @@ const MaterialSettingsSurface: Component = () => {
         learningId: selectedLearningId()!,
         source,
         preferOffline,
+        ocrEngine: type === "pdf" || type === "image" ? "openai_vision" : undefined,
+        transcriptionEngine: type === "audio" || type === "video" ? "openai_whisper" : undefined,
         payload,
       });
       await Promise.all([refetchMaterials(), refetchLibrary()]);
@@ -5552,16 +5584,10 @@ const AppSettingsSurface: Component = () => {
     typeof navigator !== "undefined" ? navigator.userAgent.slice(0, 30) : "desktop";
   const [displayName, setDisplayName] = createSignal(auth.state.user?.displayName ?? "");
   const [deviceName, setDeviceName] = createSignal(defaultDeviceName);
-  const [pricing, setPricing] = createSignal<BillingPricing | null>(null);
-  const [credits, setCredits] = createSignal<number>(0);
-  const [purchaseQuantity, setPurchaseQuantity] = createSignal(1);
   const [accountMessage, setAccountMessage] = createSignal<string | null>(null);
   const [accountError, setAccountError] = createSignal<string | null>(null);
   const [isSavingProfile, setIsSavingProfile] = createSignal(false);
   const [isIssuingSession, setIsIssuingSession] = createSignal(false);
-  const [isLoadingBilling, setIsLoadingBilling] = createSignal(false);
-  const [isStartingCheckout, setIsStartingCheckout] = createSignal(false);
-  const [checkoutError, setCheckoutError] = createSignal<string | null>(null);
 
   const [backupMessage, setBackupMessage] = createSignal<string | null>(null);
   const [backupError, setBackupError] = createSignal<string | null>(null);
@@ -5574,30 +5600,6 @@ const AppSettingsSurface: Component = () => {
   };
 
   createEffect(syncAuthFields);
-
-  const loadBilling = async () => {
-    if (auth.state.status !== "ready") return;
-    setIsLoadingBilling(true);
-    setCheckoutError(null);
-    try {
-      const [pricingResult, balanceResult] = await Promise.all([
-        fetchBillingPricing(),
-        fetchBillingBalance(),
-      ]);
-      setPricing(pricingResult);
-      setCredits(balanceResult.credits ?? 0);
-    } catch (error) {
-      setCheckoutError(error instanceof Error ? error.message : "課金情報の取得に失敗しました。");
-    } finally {
-      setIsLoadingBilling(false);
-    }
-  };
-
-  createEffect(() => {
-    if (auth.state.status === "ready") {
-      void loadBilling();
-    }
-  });
 
   const handleExport = async () => {
     setIsExporting(true);
@@ -5694,40 +5696,12 @@ const AppSettingsSurface: Component = () => {
         `Googleでサインインしました: ${response.user.displayName ?? response.user.email ?? "user"}`,
       );
       setDisplayName(response.user.displayName ?? "");
-      void loadBilling();
     } catch (error) {
       setAccountError(
         error instanceof Error ? error.message : "Googleサインインに失敗しました。",
       );
     } finally {
       setIsSavingProfile(false);
-    }
-  };
-
-  const startCheckout = async (quantity = 1) => {
-    setCheckoutError(null);
-    setIsStartingCheckout(true);
-    try {
-      const origin =
-        typeof window !== "undefined" && window.location?.origin
-          ? window.location.origin
-          : "http://127.0.0.1:5173";
-      const response = await createBillingCheckout({
-        quantity,
-        successUrl: `${origin}/?billing=success`,
-        cancelUrl: `${origin}/?billing=cancel`,
-      });
-      if (response.url) {
-        window.location.href = response.url;
-      } else {
-        setCheckoutError("決済URLを取得できませんでした。");
-      }
-    } catch (error) {
-      setCheckoutError(
-        error instanceof Error ? error.message : "チェックアウトの開始に失敗しました。",
-      );
-    } finally {
-      setIsStartingCheckout(false);
     }
   };
 
@@ -5751,8 +5725,6 @@ const AppSettingsSurface: Component = () => {
 
   const signOut = () => {
     auth.signOut();
-    setCredits(0);
-    setPricing(null);
     setAccountMessage("ローカルのセッションをクリアしました。");
     setAccountError(null);
   };
@@ -5920,88 +5892,6 @@ const AppSettingsSurface: Component = () => {
           <Show when={authError()}>
             <p class="text-xs text-rose-700">{authError()}</p>
           </Show>
-        </div>
-      </div>
-
-      <div class="rounded-xl border border-indigo-100 bg-indigo-50 p-4 shadow-sm">
-        <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-          <div class="space-y-1">
-            <p class="text-xs font-semibold uppercase text-indigo-600">
-              クレジット課金 (Stripe)
-            </p>
-            <h2 class="text-lg font-bold text-slate-900">
-              適正化価格でクレジットをまとめ買い
-            </h2>
-            <p class="text-sm text-slate-700">
-              生成やAPI呼び出しのコストをクレジットで前払いします。価格は安定したレートで提供しています。
-            </p>
-          </div>
-          <div class="rounded-lg bg-white px-3 py-2 text-sm text-slate-800 shadow-sm">
-            <p class="text-xs font-semibold text-slate-500">残高</p>
-            <p class="text-lg font-bold text-slate-900">{credits()} credits</p>
-            <Show when={pricing()}>
-              {(price) => (
-                <p class="text-[11px] text-slate-600">
-                  {price().effectiveCreditsPerPack} credits / {price().currency.toUpperCase()}{" "}
-                  {(price().unitAmount / 100).toFixed(2)}
-                </p>
-              )}
-            </Show>
-          </div>
-        </div>
-
-        <div class="mt-4 grid gap-3 md:grid-cols-[2fr_1fr]">
-          <div class="space-y-2">
-            <label class="flex flex-col gap-1 text-sm">
-              <span class="text-xs font-semibold text-slate-600">
-                購入パック数 (1-10)
-              </span>
-              <input
-                type="number"
-                min="1"
-                max="10"
-                class="w-32 rounded-lg border border-slate-200 px-3 py-2 text-sm"
-                value={purchaseQuantity()}
-                onInput={(event) =>
-                  setPurchaseQuantity(
-                    Math.min(10, Math.max(1, Number(event.currentTarget.value) || 1)),
-                  )
-                }
-              />
-            </label>
-            <p class="text-xs text-slate-600">
-              1パック = {pricing()?.effectiveCreditsPerPack ?? 120} credits /{" "}
-              {pricing()?.currency?.toUpperCase() ?? "JPY"} {((pricing()?.unitAmount ?? 1200) / 100).toFixed(2)}。
-              クレジット単価が極端に下がらないよう調整しています。
-            </p>
-            <div class="flex flex-wrap gap-2 text-xs">
-              <button
-                class="rounded-lg bg-indigo-600 px-4 py-2 font-semibold text-white shadow-sm transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
-                onClick={() => startCheckout(purchaseQuantity())}
-                disabled={isStartingCheckout() || isLoadingBilling()}
-              >
-                {isStartingCheckout() ? "リダイレクト中..." : "Stripeで購入する"}
-              </button>
-              <button
-                class="rounded-lg border border-slate-200 px-3 py-2 font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
-                onClick={() => loadBilling()}
-                disabled={isLoadingBilling()}
-              >
-                {isLoadingBilling() ? "更新中..." : "残高を更新"}
-              </button>
-            </div>
-            <Show when={checkoutError()}>
-              {(msg) => <p class="text-xs text-rose-700">{msg()}</p>}
-            </Show>
-          </div>
-          <div class="rounded-lg border border-indigo-100 bg-white px-3 py-2 text-xs text-slate-700 shadow-sm">
-            <p class="font-semibold text-slate-900">適正化レートについて</p>
-            <ul class="mt-2 list-disc space-y-1 pl-4">
-              <li>OpenAI等のコスト変動を吸収しやすいよう一定レートで運用しています。</li>
-              <li>クレジットはモデル/生成/埋め込みで共通利用できます。</li>
-              <li>購入後すぐに残高へ反映されます（Stripe完了後）。</li>
-            </ul>
-          </div>
         </div>
       </div>
 

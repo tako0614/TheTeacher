@@ -136,20 +136,11 @@ export const processMaterialFile = async (
       );
     }
 
-    const payload: ProcessedMaterial = {
+    return {
       fileName: file.name,
       bytes: file.size,
       mimeType: file.type || `${type}/*`,
     };
-
-    try {
-      payload.dataUrl = await readFileAsDataUrl(file);
-    } catch (error) {
-      logger.warn("Failed to encode media as data URL", "FileProcessing", error);
-      throw new Error("音声/動画を読み込めませんでした。もう一度お試しください。");
-    }
-
-    return payload;
   }
 
   return {

@@ -15,17 +15,23 @@ import {
   authSessionResponseSchema,
   bootstrapSessionRequestSchema,
   buildFallbackFeedback,
+  buildFallbackMaterialGeneration,
   buildGenerationJob,
   buildIngestJob,
   buildLibraryAssetPayload,
+  buildLibraryAssetStorageKey,
   buildLibraryEntryRecord,
   buildLearningTagsFromPrompt,
   buildLearningTitleFromPrompt,
   buildProxyActionsPayload,
   buildProxyFallbackMessage,
+  buildFallbackChatProxyResponse,
   callOpenAiProxyChat,
+  chatProxyWithOpenAi,
   chunkMaterialText,
   cloneIngestJob,
+  completeLibraryUploadSession,
+  createLibraryUploadSession,
   createSession,
   createUser,
   DEFAULT_USER_DISPLAY_NAME,
@@ -46,6 +52,7 @@ import {
   fetchPreset,
   fetchUserByEmail,
   generateContentsFromMaterial,
+  generateMaterialWithOpenAi,
   generateEmbeddings,
   generateFromMaterialRequestSchema,
   getPrismaClient,
@@ -56,9 +63,11 @@ import {
   isUuid,
   issueSessionRequestSchema,
   learningListQuerySchema,
+  materialListQuerySchema,
   libraryEntryListQuerySchema,
   listIngestJobs,
   listLearnings,
+  listMaterials,
   listLibraryEntries,
   mapGeneratedContent,
   mapMaterial,
@@ -70,6 +79,8 @@ import {
   presetListQuerySchema,
   PREPROCESS_STEP_KINDS,
   practiceGradingRequestSchema,
+  materialGenerateRequestSchema,
+  openAiChatProxyRequestSchema,
   proxyRequestSchema,
   requireAuth,
   resolveMaterialForGeneration,
@@ -80,6 +91,8 @@ import {
   saveLibraryAsset,
   saveLibraryEntry,
   searchSemantic,
+  syncSemanticIndexToVectorize,
+  contentSearchRequestSchema,
   semanticSearchRequestSchema,
   serializeMatchesForClient,
   shouldCreateLearningFromPrompt,
@@ -87,6 +100,8 @@ import {
   toEmbedding,
   toolCallSchema,
   ToolCallError,
+  uploadLibraryPart,
+  abortLibraryUploadSession,
   updateLearningProgress,
   updateLearningSchema,
   updateMaterialSchema,
@@ -106,23 +121,6 @@ import {
 import type { ProxyResponseContext, SemanticMatch } from "./api-core";
 import { enqueueTtsJob } from "./api/tts";
 import { verifyGoogleIdToken } from "./core/google-auth";
-import {
-  addUserCredits,
-  createStripeCheckoutSession,
-  creditsForCheckout,
-  getUserCredits,
-  resolvePricing,
-  consumeUserCredits,
-  verifyStripeSignature,
-} from "./core/billing";
-
-const CREDIT_COST = {
-  embed: 1,
-  semanticSearch: 1,
-  proxyChat: 3,
-  generation: 5,
-  practiceGrade: 1,
-};
 
 app.get("/health", (c) => {
   return c.json({ status: "ok" });
@@ -233,95 +231,6 @@ app.post("/api/auth/google", async (c) => {
     const message = error instanceof Error ? error.message : "invalid_google_token";
     return c.json({ error: "invalid_google_token", message }, status);
   }
-});
-
-app.get("/api/billing/pricing", (c) => {
-  const pricing = resolvePricing(c.env);
-  return c.json({ pricing });
-});
-
-app.get("/api/billing/balance", async (c) => {
-  const { user } = requireAuth(c);
-  const db = c.env.DB;
-  if (!db) return c.json({ error: "db_not_configured" }, 503);
-  const credits = await getUserCredits(db, user.id);
-  return c.json({ credits });
-});
-
-app.post("/api/billing/checkout", async (c) => {
-  const { user } = requireAuth(c);
-  const db = c.env.DB;
-  if (!db) return c.json({ error: "db_not_configured" }, 503);
-  const body = await c.req.json().catch(() => ({}));
-  const quantity = Number(body?.quantity ?? 1);
-  const successUrl = typeof body?.successUrl === "string" ? body.successUrl : undefined;
-  const cancelUrl = typeof body?.cancelUrl === "string" ? body.cancelUrl : undefined;
-  if (!successUrl || !cancelUrl) {
-    return c.json({ error: "invalid_request", message: "successUrl and cancelUrl are required" }, 400);
-  }
-  try {
-    const session = await createStripeCheckoutSession(c.env, {
-      quantity,
-      userId: user.id,
-      successUrl,
-      cancelUrl,
-    });
-    return c.json({ url: session.url, sessionId: session.id });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "failed to create checkout session";
-    return c.json({ error: "stripe_error", message }, 500);
-  }
-});
-
-app.post("/api/billing/webhook", async (c) => {
-  const secret = c.env.STRIPE_WEBHOOK_SECRET;
-  const db = c.env.DB;
-  if (!secret || !db) return c.json({ error: "webhook_not_configured" }, 503);
-
-  const signature = c.req.header("stripe-signature");
-  const rawBody = await c.req.raw.clone().arrayBuffer();
-  const verified = await verifyStripeSignature(secret, signature ?? null, rawBody);
-  if (!verified) {
-    return c.json({ error: "invalid_signature" }, 400);
-  }
-
-  const event = (await c.req.json().catch(() => null)) as {
-    type?: string;
-    data?: { object?: Record<string, unknown> };
-  } | null;
-  if (!event?.type) return c.json({ ok: true });
-
-  if (event.type === "checkout.session.completed") {
-    const session = event.data?.object ?? {};
-    const metadata = (session as { metadata?: Record<string, unknown> }).metadata ?? {};
-    const userId =
-      (metadata.userId as string | undefined) ??
-      ((session as { client_reference_id?: string }).client_reference_id as string | undefined);
-    const quantity =
-      typeof metadata.quantity === "string"
-        ? Number(metadata.quantity)
-        : typeof metadata.quantity === "number"
-          ? Number(metadata.quantity)
-          : Number((session as { amount_total?: number }).amount_total) > 0
-            ? Math.max(
-                1,
-                Math.round(
-                  ((session as { amount_total?: number }).amount_total as number) /
-                    resolvePricing(c.env).unitAmount,
-                ),
-              )
-            : 1;
-    if (userId) {
-      const packs = Number.isFinite(quantity) ? Math.max(1, Number(quantity)) : 1;
-      const amountTotal = (session as { amount_total?: number }).amount_total;
-      const unitAmountFromStripe =
-        typeof amountTotal === "number" && packs > 0 ? Math.floor(amountTotal / packs) : undefined;
-      const added = creditsForCheckout(packs, c.env, unitAmountFromStripe);
-      await addUserCredits(db, userId, added);
-    }
-  }
-
-  return c.json({ ok: true });
 });
 
 app.get("/api/learnings", async (c) => {
@@ -455,10 +364,10 @@ app.delete("/api/learnings/:id", async (c) => {
   const materialIds = materialRows.map((row) => row.id);
   const generatedIds = generatedRows.map((row) => row.id);
   const practiceIds = practiceRows.map((row) => row.id);
-  await deleteSemanticNodesByRef(c.env.DB, "learning", [id], user.id);
-  await deleteSemanticNodesByRef(c.env.DB, "material", materialIds, user.id);
-  await deleteSemanticNodesByRef(c.env.DB, "generated_content", generatedIds, user.id);
-  await deleteSemanticNodesByRef(c.env.DB, "question", practiceIds, user.id);
+  await deleteSemanticNodesByRef(c.env.DB, c.env, "learning", [id], user.id);
+  await deleteSemanticNodesByRef(c.env.DB, c.env, "material", materialIds, user.id);
+  await deleteSemanticNodesByRef(c.env.DB, c.env, "generated_content", generatedIds, user.id);
+  await deleteSemanticNodesByRef(c.env.DB, c.env, "question", practiceIds, user.id);
   return c.json({ ok: true });
 });
 
@@ -474,12 +383,96 @@ app.get("/api/learnings/:id/materials", async (c) => {
   return c.json({ items });
 });
 
+app.get("/api/materials", async (c) => {
+  const { user } = requireAuth(c);
+  const query = Object.fromEntries(new URL(c.req.url).searchParams);
+  const parsed = materialListQuerySchema.safeParse(query);
+  if (!parsed.success) {
+    return c.json({ error: "invalid_query", issues: parsed.error.format() }, 400);
+  }
+  const items = await listMaterials(c.env.DB, parsed.data, user.id);
+  return c.json({ items, count: items.length });
+});
+
 app.get("/api/materials/:id", async (c) => {
   const id = c.req.param("id");
   const { user } = requireAuth(c);
   const material = await fetchMaterial(c.env.DB, id, user.id);
   if (!material) return c.json({ error: "not_found" }, 404);
   return c.json(material);
+});
+
+app.post("/api/materials/library/uploads", async (c) => {
+  const { user } = requireAuth(c);
+  const body = await c.req.json().catch(() => ({}));
+  const fileName = typeof body?.fileName === "string" ? body.fileName : undefined;
+  const mimeType = typeof body?.mimeType === "string" ? body.mimeType : undefined;
+  const size = typeof body?.size === "number" ? body.size : Number(body?.size ?? NaN);
+  try {
+    const created = await createLibraryUploadSession(c.env, {
+      userId: user.id,
+      fileName,
+      mimeType,
+      size: Number.isFinite(size) ? size : undefined,
+    });
+    return c.json(created, 201);
+  } catch (error) {
+    return c.json(
+      { error: "upload_session_failed", message: error instanceof Error ? error.message : "failed" },
+      503,
+    );
+  }
+});
+
+app.put("/api/materials/library/uploads/:id/parts/:part", async (c) => {
+  const { user } = requireAuth(c);
+  const sessionId = c.req.param("id");
+  const partNumber = Number(c.req.param("part"));
+  const buffer = await c.req.arrayBuffer().catch(() => null);
+  if (!buffer) return c.json({ error: "invalid_request", message: "missing body" }, 400);
+  try {
+    const result = await uploadLibraryPart(
+      c.env,
+      sessionId,
+      user.id,
+      partNumber,
+      new Uint8Array(buffer),
+    );
+    return c.json(result);
+  } catch (error) {
+    return c.json(
+      { error: "upload_part_failed", message: error instanceof Error ? error.message : "failed" },
+      400,
+    );
+  }
+});
+
+app.post("/api/materials/library/uploads/:id/complete", async (c) => {
+  const { user } = requireAuth(c);
+  const sessionId = c.req.param("id");
+  try {
+    const result = await completeLibraryUploadSession(c.env, sessionId, user.id);
+    return c.json(result);
+  } catch (error) {
+    return c.json(
+      { error: "upload_complete_failed", message: error instanceof Error ? error.message : "failed" },
+      400,
+    );
+  }
+});
+
+app.delete("/api/materials/library/uploads/:id", async (c) => {
+  const { user } = requireAuth(c);
+  const sessionId = c.req.param("id");
+  try {
+    const result = await abortLibraryUploadSession(c.env, sessionId, user.id);
+    return c.json(result);
+  } catch (error) {
+    return c.json(
+      { error: "upload_abort_failed", message: error instanceof Error ? error.message : "failed" },
+      400,
+    );
+  }
 });
 
 app.post("/api/materials/ingest", async (c) => {
@@ -495,7 +488,7 @@ app.post("/api/materials/ingest", async (c) => {
   if (!learning) return c.json({ error: "learning_not_found" }, 404);
   const prisma = getPrismaClient(c.env.DB);
 
-  const requiresBinaryPayload = Boolean(request.payload?.dataUrl);
+  const requiresBinaryPayload = Boolean(request.payload?.dataUrl || request.payload?.libraryEntryId);
   const needsOcr = request.source.kind === "image" || request.source.kind === "pdf";
   const needsTranscription = request.source.kind === "audio" || request.source.kind === "video";
   const shouldDeferExtraction = requiresBinaryPayload && (needsOcr || needsTranscription);
@@ -532,15 +525,27 @@ app.post("/api/materials/ingest", async (c) => {
   const extracted = extractedResult?.extracted;
   const ingestMetadata = extractedResult?.metadata;
   const id = crypto.randomUUID();
-  const libraryEntryId = crypto.randomUUID();
+  const libraryEntryId =
+    typeof request.payload?.libraryEntryId === "string" && request.payload.libraryEntryId.trim()
+      ? request.payload.libraryEntryId.trim()
+      : crypto.randomUUID();
   const createdAt = nowIso();
   const updatedAt = createdAt;
   const type = request.source.kind as Material["type"];
-  const assetPayload = buildLibraryAssetPayload(request.payload);
+  const assetPayload =
+    request.payload?.libraryEntryId && !request.payload.dataUrl && !request.payload.text
+      ? null
+      : buildLibraryAssetPayload(request.payload);
   let assetUpload: Awaited<ReturnType<typeof saveLibraryAsset>> | null = null;
+  const uploadedStorageKey =
+    request.payload?.libraryEntryId && request.payload.fileName
+      ? buildLibraryAssetStorageKey(libraryEntryId, request.payload.fileName)
+      : request.payload?.libraryEntryId
+        ? buildLibraryAssetStorageKey(libraryEntryId, `${libraryEntryId}.bin`)
+        : undefined;
   if (assetPayload) {
     try {
-      assetUpload = await saveLibraryAsset(c.env.DB, libraryEntryId, assetPayload);
+      assetUpload = await saveLibraryAsset(c.env, libraryEntryId, assetPayload);
     } catch (error) {
       console.error("material asset upload failed", error);
       return c.json(
@@ -551,6 +556,11 @@ app.post("/api/materials/ingest", async (c) => {
         500,
       );
     }
+  } else if (request.payload?.libraryEntryId) {
+    assetUpload = {
+      key: uploadedStorageKey ?? buildLibraryAssetStorageKey(libraryEntryId, request.payload.fileName),
+      publicPath: `/api/materials/library/${libraryEntryId}/content`,
+    };
   }
   const assetPath = assetUpload?.publicPath;
   const sourcePath =
@@ -691,6 +701,26 @@ app.post("/api/materials", async (c) => {
   const material = mapMaterial(row as unknown as MaterialRow);
   if (material) {
     const learning = await fetchLearning(c.env.DB, material.learningId, user.id);
+    if (material.rawContent && material.rawContent.trim().length > 0) {
+      const request = {
+        learningId: material.learningId,
+        source: { kind: "text", text: material.rawContent },
+      };
+      const jobDraft = prepareJobForProcessing(buildIngestJob(request, "processing", material.id));
+      const job = await saveIngestJob(c.env.DB, { ...jobDraft, outputMaterialId: material.id }, user.id);
+      const hasPipelineWork = job.steps.some((step) => step.status === "running" || step.status === "pending");
+      if (hasPipelineWork) {
+        const promise = enqueueIngestJobProcessing({
+          db: c.env.DB,
+          jobId: job.id,
+          materialId: material.id,
+          learningId: material.learningId,
+          text: material.rawContent,
+          env: c.env,
+        });
+        c.executionCtx?.waitUntil(promise);
+      }
+    }
     await indexMaterialSemanticNode(c.env.DB, c.env, material, learning?.subject ?? undefined);
   }
   return c.json(material, 201);
@@ -819,6 +849,8 @@ app.put("/api/materials/:id", async (c) => {
 
   const data = parsed.data;
   const updatedAt = data.updatedAt ?? nowIso();
+  const rawContentChanged =
+    typeof data.rawContent === "string" && data.rawContent.trim().length > 0 && data.rawContent !== (exists.rawContent ?? "");
 
   const prisma = getPrismaClient(c.env.DB);
   await prisma.material.update({
@@ -835,6 +867,26 @@ app.put("/api/materials/:id", async (c) => {
   const material = await fetchMaterial(c.env.DB, id, user.id);
   if (material) {
     const learning = await fetchLearning(c.env.DB, material.learningId, user.id);
+    if (rawContentChanged && material.rawContent && material.rawContent.trim().length > 0) {
+      const request = {
+        learningId: material.learningId,
+        source: { kind: "text", text: material.rawContent },
+      };
+      const jobDraft = prepareJobForProcessing(buildIngestJob(request, "processing", material.id));
+      const job = await saveIngestJob(c.env.DB, { ...jobDraft, outputMaterialId: material.id }, user.id);
+      const hasPipelineWork = job.steps.some((step) => step.status === "running" || step.status === "pending");
+      if (hasPipelineWork) {
+        const promise = enqueueIngestJobProcessing({
+          db: c.env.DB,
+          jobId: job.id,
+          materialId: material.id,
+          learningId: material.learningId,
+          text: material.rawContent,
+          env: c.env,
+        });
+        c.executionCtx?.waitUntil(promise);
+      }
+    }
     await indexMaterialSemanticNode(c.env.DB, c.env, material, learning?.subject ?? undefined);
   }
   return c.json(material);
@@ -860,8 +912,8 @@ app.delete("/api/materials/:id", async (c) => {
     where: { materialId: id, OR: [{ userId: null }, { userId: user.id }] },
   });
   const generatedIds = generatedRows.map((row) => row.id).filter(Boolean);
-  await deleteSemanticNodesByRef(c.env.DB, "material", [id], user.id);
-  await deleteSemanticNodesByRef(c.env.DB, "generated_content", generatedIds, user.id);
+  await deleteSemanticNodesByRef(c.env.DB, c.env, "material", [id], user.id);
+  await deleteSemanticNodesByRef(c.env.DB, c.env, "generated_content", generatedIds, user.id);
   return c.json({ ok: true });
 });
 
@@ -895,7 +947,7 @@ app.delete("/api/contents/:id", async (c) => {
   const { user } = requireAuth(c);
   const prisma = getPrismaClient(c.env.DB);
   await prisma.generatedContent.deleteMany({ where: { id, userId: user.id } });
-  await deleteSemanticNodesByRef(c.env.DB, "generated_content", [id], user.id);
+  await deleteSemanticNodesByRef(c.env.DB, c.env, "generated_content", [id], user.id);
   return c.json({ ok: true });
 });
 
@@ -910,13 +962,6 @@ app.post("/api/generate/from-material", async (c) => {
   }
 
   const request = parsed.data;
-  try {
-    await consumeUserCredits(db, user.id, CREDIT_COST.generation);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "insufficient_credits";
-    return c.json({ error: "insufficient_credits", message }, 402);
-  }
-
   const learning = await fetchLearning(db, request.learningId, user.id);
   if (!learning) return c.json({ error: "learning_not_found" }, 404);
 
@@ -1135,21 +1180,12 @@ app.delete("/api/presets/:id", async (c) => {
 });
 
 app.post("/ai/embed", async (c) => {
-  const { user } = requireAuth(c);
-  const db = c.env.DB;
-  if (!db) return c.json({ error: "db_not_configured" }, 503);
+  requireAuth(c);
   const body = await c.req.json().catch(() => null);
   const parsed = embedRequestSchema.safeParse(body);
 
   if (!parsed.success) {
     return c.json({ error: "invalid_request", issues: parsed.error.format() }, 400);
-  }
-
-  try {
-    await consumeUserCredits(db, user.id, CREDIT_COST.embed);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "insufficient_credits";
-    return c.json({ error: "insufficient_credits", message }, 402);
   }
 
   const { embeddings, dimension, model, provider } = await generateEmbeddings(
@@ -1180,6 +1216,104 @@ app.post("/search/semantic", async (c) => {
   return c.json({ query, topK, results });
 });
 
+app.post("/search/content", async (c) => {
+  const { user } = requireAuth(c);
+  const db = c.env?.DB;
+  if (!db) return c.json({ error: "db_not_configured" }, 503);
+  if (!c.env?.VECTORIZE) return c.json({ error: "vectorize_not_configured" }, 503);
+  if (!c.env?.OPENAI_API_KEY?.trim()) return c.json({ error: "openai_api_key_missing" }, 503);
+
+  const body = await c.req.json().catch(() => null);
+  const parsed = contentSearchRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: "invalid_request", issues: parsed.error.format() }, 400);
+  }
+
+  const { query, topK, learningId, materialId, subject } = parsed.data;
+  let queryVector: number[] | undefined;
+  try {
+    const { embeddings } = await generateEmbeddings([query], c.env, { allowFallback: false });
+    queryVector = embeddings[0];
+  } catch (error) {
+    return c.json(
+      { error: "embedding_failed", message: error instanceof Error ? error.message : "unknown error" },
+      502,
+    );
+  }
+  if (!queryVector || queryVector.length === 0) return c.json({ error: "embedding_missing" }, 502);
+
+  const filter: Record<string, unknown> = { kind: "material_chunk", userId: user.id };
+  if (learningId) filter.learningId = learningId;
+  if (materialId) filter.materialId = materialId;
+  if (subject) filter.subject = subject;
+
+  const vectorize = c.env.VECTORIZE as any;
+  const result = await vectorize.query(queryVector, {
+    topK,
+    returnValues: false,
+    returnMetadata: "all",
+    filter,
+  });
+
+  const matches = Array.isArray(result?.matches) ? result.matches : [];
+  const materialIds = Array.from(
+    new Set(
+      matches
+        .map((match: any) => match?.metadata?.materialId)
+        .filter((value: any): value is string => typeof value === "string" && value.length > 0),
+    ),
+  );
+
+  const materials = new Map<string, Material>();
+  for (const id of materialIds) {
+    const material = await fetchMaterial(db, id);
+    if (material) materials.set(id, material);
+  }
+
+  const results = matches
+    .map((match: any) => {
+      const metadata = match?.metadata ?? {};
+      const matId = typeof metadata.materialId === "string" ? metadata.materialId : undefined;
+      const order = typeof metadata.order === "number" ? metadata.order : Number(metadata.order);
+      if (!matId || !Number.isFinite(order)) return null;
+      const material = materials.get(matId);
+      const chunks = (material?.metadata as any)?.chunks;
+      const chunk = Array.isArray(chunks) ? chunks.find((entry: any) => entry?.order === order) : undefined;
+      const text = typeof chunk?.text === "string" ? chunk.text : undefined;
+      const preview = typeof metadata.preview === "string" ? metadata.preview : typeof chunk?.preview === "string" ? chunk.preview : "";
+      return {
+        id: String(match?.id ?? ""),
+        score: Number(match?.score ?? 0),
+        learningId: typeof metadata.learningId === "string" ? metadata.learningId : material?.learningId,
+        materialId: matId,
+        order,
+        preview,
+        text,
+        subject: typeof metadata.subject === "string" ? metadata.subject : undefined,
+      };
+    })
+    .filter(Boolean)
+    .slice(0, topK);
+
+  return c.json({ query, topK, results });
+});
+
+app.post("/api/semantic/reindex", async (c) => {
+  const { user } = requireAuth(c);
+  if (!c.env?.VECTORIZE) {
+    return c.json({ error: "vectorize_not_configured" }, 503);
+  }
+  try {
+    const result = await syncSemanticIndexToVectorize(c.env?.DB, c.env, user.id);
+    return c.json({ userId: user.id, ...result });
+  } catch (error) {
+    return c.json(
+      { error: "reindex_failed", message: error instanceof Error ? error.message : "unknown error" },
+      500,
+    );
+  }
+});
+
 app.post("/ai/tools", async (c) => {
   const { user } = requireAuth(c);
   const body = await c.req.json().catch(() => null);
@@ -1207,9 +1341,7 @@ app.post("/ai/tools", async (c) => {
 });
 
 app.post("/ai/practice/grade", async (c) => {
-  const { user } = requireAuth(c);
-  const db = c.env.DB;
-  if (!db) return c.json({ error: "db_not_configured" }, 503);
+  requireAuth(c);
   const body = await c.req.json().catch(() => null);
   const parsed = practiceGradingRequestSchema.safeParse(body);
   if (!parsed.success) {
@@ -1220,13 +1352,6 @@ app.post("/ai/practice/grade", async (c) => {
     ...parsed.data,
     mode: parsed.data.mode ?? "text",
   };
-
-  try {
-    await consumeUserCredits(db, user.id, CREDIT_COST.practiceGrade);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "insufficient_credits";
-    return c.json({ error: "insufficient_credits", message }, 402);
-  }
 
   const fallback = buildFallbackFeedback(request);
   let feedback = fallback;
@@ -1251,6 +1376,62 @@ app.post("/ai/practice/grade", async (c) => {
   return c.json(response);
 });
 
+app.post("/ai/material/generate", async (c) => {
+  requireAuth(c);
+  const body = await c.req.json().catch(() => null);
+  const parsed = materialGenerateRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: "invalid_request", issues: parsed.error.format() }, 400);
+  }
+
+  try {
+    const response = c.env?.OPENAI_API_KEY?.trim()
+      ? await generateMaterialWithOpenAi(c.env, parsed.data)
+      : buildFallbackMaterialGeneration(parsed.data);
+    return c.json(response);
+  } catch (error) {
+    if (error instanceof ToolCallError) {
+      return c.json({ error: error.code, message: error.message }, error.status as ContentfulStatusCode);
+    }
+    console.error("material_generate_failed", error);
+    return c.json(
+      {
+        error: "generation_failed",
+        message: error instanceof Error ? error.message : "unknown error",
+      },
+      500,
+    );
+  }
+});
+
+app.post("/ai/chat", async (c) => {
+  requireAuth(c);
+  const body = await c.req.json().catch(() => null);
+  const parsed = openAiChatProxyRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: "invalid_request", issues: parsed.error.format() }, 400);
+  }
+
+  try {
+    const response = c.env?.OPENAI_API_KEY?.trim()
+      ? await chatProxyWithOpenAi(c.env, parsed.data)
+      : buildFallbackChatProxyResponse(parsed.data);
+    return c.json(response);
+  } catch (error) {
+    if (error instanceof ToolCallError) {
+      return c.json({ error: error.code, message: error.message }, error.status as ContentfulStatusCode);
+    }
+    console.error("chat_proxy_failed", error);
+    return c.json(
+      {
+        error: "proxy_failed",
+        message: error instanceof Error ? error.message : "unknown error",
+      },
+      500,
+    );
+  }
+});
+
 app.post("/ai/proxy", async (c) => {
   const { user } = requireAuth(c);
   const db = c.env.DB;
@@ -1266,13 +1447,6 @@ app.post("/ai/proxy", async (c) => {
       },
       400,
     );
-  }
-
-  try {
-    await consumeUserCredits(db, user.id, CREDIT_COST.proxyChat);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "insufficient_credits";
-    return c.json({ error: "insufficient_credits", message }, 402);
   }
 
   const prompt = parsed.data.prompt.trim();

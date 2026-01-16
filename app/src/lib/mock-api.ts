@@ -156,26 +156,6 @@ export const mockApi = {
     return { user: clone(store.user), session: clone(store.session), token };
   },
 
-  async fetchBillingPricing() {
-    return {
-      currency: "jpy",
-      unitAmount: 1200,
-      creditsPerPack: 120,
-      effectiveCreditsPerPack: 120,
-      minPricePerCredit: 12,
-      label: "120 credits / JPY 12.0",
-      priceId: "price_mock",
-    };
-  },
-
-  async fetchBillingBalance() {
-    return { credits: store.user.credits ?? 0 };
-  },
-
-  async createBillingCheckout() {
-    return { url: "https://example.com/checkout" };
-  },
-
   async updateUserProfile(input: { email?: string; displayName?: string }) {
     store.user = { ...store.user, ...input, updatedAt: nowIso() };
     return { user: clone(store.user) };

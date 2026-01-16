@@ -18,10 +18,10 @@ const sanitizeStorageFileName = (value?: string, fallback = "asset.bin") => {
   return normalized.length ? normalized.slice(0, 120) : fallback;
 };
 
-const buildLibraryAssetKey = (entryId: string, fileName?: string) =>
+export const buildLibraryAssetStorageKey = (entryId: string, fileName?: string) =>
   `materials/${entryId}/${sanitizeStorageFileName(fileName ?? `${entryId}.bin`)}`;
 
-const libraryAssetKvKey = (entryId: string) => `library-asset:${entryId}`;
+export const libraryAssetIndexKey = (entryId: string) => `library-asset:${entryId}`;
 
 const fetchLegacyLibraryAsset = async (db: D1Database | undefined, entryId: string) => {
   if (!db) return null;
@@ -50,7 +50,7 @@ const putLibraryAssetIndex = async (
   record: { key: string; size: number; mimeType: string; fileName?: string },
 ) => {
   if (!env.MATERIALS_KV) return;
-  await env.MATERIALS_KV.put(libraryAssetKvKey(entryId), JSON.stringify(record), {
+  await env.MATERIALS_KV.put(libraryAssetIndexKey(entryId), JSON.stringify(record), {
     metadata: { entryId },
   });
 };
@@ -63,7 +63,7 @@ export const saveLibraryAsset = async (
   if (!env.MATERIALS_BUCKET) {
     throw new Error("MATERIALS_BUCKET binding is required to store materials in R2");
   }
-  const key = buildLibraryAssetKey(entryId, asset.fileName);
+  const key = buildLibraryAssetStorageKey(entryId, asset.fileName);
   await env.MATERIALS_BUCKET.put(key, asset.bytes.buffer, {
     httpMetadata: { contentType: asset.mimeType },
     customMetadata: { entryId },
@@ -81,7 +81,7 @@ export const fetchLibraryAsset = async (env: AppBindings, entry: MaterialLibrary
   if (!env.MATERIALS_BUCKET) {
     return fetchLegacyLibraryAsset(env.DB, entry.id);
   }
-  const kvRecord = ((await env.MATERIALS_KV?.get(libraryAssetKvKey(entry.id), "json").catch(() => null)) ||
+  const kvRecord = ((await env.MATERIALS_KV?.get(libraryAssetIndexKey(entry.id), "json").catch(() => null)) ||
     null) as { key?: string; mimeType?: string; size?: number } | null;
   const key = kvRecord?.key ?? entry.storedPath ?? entry.libraryPath;
   if (!key) return null;
@@ -113,13 +113,13 @@ export const deleteLibraryAssetsForMaterial = async (env: AppBindings, materialI
   });
   await Promise.all(
     entries.map(async (entry) => {
-      const kvKey = ((await env.MATERIALS_KV?.get(libraryAssetKvKey(entry.id), "json").catch(() => null)) ||
+      const kvKey = ((await env.MATERIALS_KV?.get(libraryAssetIndexKey(entry.id), "json").catch(() => null)) ||
         null) as { key?: string } | null;
       const key = kvKey?.key ?? entry.storedPath ?? undefined;
       if (bucket && key) {
         await bucket.delete(key).catch(() => undefined);
       }
-      await env.MATERIALS_KV?.delete(libraryAssetKvKey(entry.id)).catch(() => undefined);
+      await env.MATERIALS_KV?.delete(libraryAssetIndexKey(entry.id)).catch(() => undefined);
     }),
   );
   if (entries.length > 0) {

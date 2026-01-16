@@ -69,6 +69,15 @@ const buildUrl = (path: string, query?: RequestConfig["query"]) => {
   return url.toString();
 };
 
+export interface RawRequestConfig {
+  path: string;
+  method?: "GET" | "POST" | "PUT" | "DELETE";
+  query?: Record<string, string | number | undefined>;
+  body?: BodyInit | Uint8Array | ArrayBuffer | null;
+  headers?: Record<string, string>;
+  skipAuth?: boolean;
+}
+
 export const requestJson = async <T>(config: RequestConfig): Promise<T> => {
   let token = readSessionToken();
   if (!token && !config.skipAuth) {
@@ -117,7 +126,42 @@ export const requestJson = async <T>(config: RequestConfig): Promise<T> => {
   return (await res.json()) as T;
 };
 
+export const requestRaw = async (config: RawRequestConfig): Promise<Response> => {
+  let token = readSessionToken();
+  if (!token && !config.skipAuth) {
+    token = await ensureSessionToken();
+  }
+
+  const url = buildUrl(config.path, config.query);
+  const method = config.method ?? "GET";
+  const shouldAttachAuth = !config.skipAuth && Boolean(token);
+  const headers: Record<string, string> = {
+    ...(config.headers ?? {}),
+    ...(shouldAttachAuth && token ? { Authorization: `Bearer ${token}` } : {}),
+  };
+
+  const body =
+    config.body instanceof ArrayBuffer ? new Uint8Array(config.body) : (config.body as BodyInit | null | undefined);
+
+  if (isTauri()) {
+    const { fetch } = await import("@tauri-apps/plugin-http");
+    // plugin-http supports Uint8Array for binary payloads.
+    return (await fetch(url, {
+      method,
+      headers,
+      body: body as unknown as Uint8Array | string | null | undefined,
+    })) as unknown as Response;
+  }
+
+  return fetch(url, {
+    method,
+    headers,
+    body: body as BodyInit | null | undefined,
+  });
+};
+
 export const http = {
   baseUrl: API_BASE_URL,
   requestJson,
+  requestRaw,
 };

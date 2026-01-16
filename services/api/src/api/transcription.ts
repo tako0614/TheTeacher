@@ -20,14 +20,18 @@ export const performTranscription = async (
     preferOffline?: boolean;
   },
 ): Promise<TranscriptionResult> => {
-  // Current offline placeholder handling logic should be moved here or kept in ingest?
-  // Ingest was handling "offline" by summarizing a placeholder string.
-  // Real offline transcription (Whisper locally) is hard in Worker.
-  // We will stick to OpenAI for now, but add the structure for others.
-  
-  const useOpenAi = !!env?.OPENAI_API_KEY && !options?.preferOffline;
+  const preferred = options?.preferredEngine?.trim();
+  const preferOffline = options?.preferOffline ?? false;
 
-  if (useOpenAi) {
+  if (preferOffline) {
+    throw new Error("Offline transcription is not available in this environment");
+  }
+
+  const shouldUseOpenAi =
+    (!preferred || preferred === "openai_whisper" || preferred === "whisper_rs") &&
+    !!env?.OPENAI_API_KEY;
+
+  if (shouldUseOpenAi) {
     try {
       const result = await transcribeWithOpenAi(env, payload, {
         fileName: options?.fileName,
@@ -47,12 +51,8 @@ export const performTranscription = async (
     }
   }
 
-  // Fallback or Offline
-  // Since we don't have a real local whisper, we throw or return a placeholder if the caller expects it.
-  // However, the caller (ingest.ts) logic for offline was "summarize a placeholder".
-  // We can throw here and let ingest handle the fallback, OR return a special "offline" result.
-  // To keep this function pure "transcription", if we can't transcribe, we should throw.
-  // But if options.preferOffline is true, maybe we return a dummy?
-  
-  throw new Error("No suitable transcription engine available (Offline mode not fully supported for actual transcription yet)");
+  if (preferred) {
+    throw new Error(`No suitable transcription engine available: ${preferred}`);
+  }
+  throw new Error("No suitable transcription engine available");
 };

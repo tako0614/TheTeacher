@@ -6,6 +6,7 @@ import type { IngestJob } from "@theteacher/shared";
 import { describe, expect, it } from "vitest";
 
 import * as dataModule from "./api/data";
+import * as embeddingsModule from "./api/embeddings";
 import * as ingestModule from "./api/ingest";
 import * as generationModule from "./api/generation";
 import * as proxyModule from "./api/proxy";
@@ -56,6 +57,50 @@ describe("api worker", () => {
     expect(typeof json.feedback.comment).toBe("string");
   });
 
+  it("generates QA, practice, and summary from material with fallback", async () => {
+    const res = await app.request("/ai/material/generate", {
+      method: "POST",
+      body: JSON.stringify({
+        materialTitle: "一次関数",
+        materialText: "一次関数は y = ax + b の形で表され、a は傾き、b は切片です。",
+        qaCount: 2,
+        practiceCount: 2,
+      }),
+    });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(Array.isArray(json.qa)).toBe(true);
+    expect(json.qa).toHaveLength(2);
+    expect(Array.isArray(json.practice)).toBe(true);
+    expect(json.practice).toHaveLength(2);
+    expect(json.summary.bullets.length).toBeGreaterThan(0);
+  });
+
+  it("proxies generic chat with fallback when no model is configured", async () => {
+    const res = await app.request("/ai/chat", {
+      method: "POST",
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: "英単語の覚え方を教えて" }],
+      }),
+    });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(typeof json.text).toBe("string");
+    expect(json.text.length).toBeGreaterThan(0);
+  });
+
+  it("rejects disallowed models for the generic chat proxy", async () => {
+    const res = await app.request("/ai/chat", {
+      method: "POST",
+      body: JSON.stringify({
+        model: "gpt-4o",
+        messages: [{ role: "user", content: "test" }],
+      }),
+    });
+    expect(res.status).toBe(400);
+  });
+
   it("generates embeddings with a deterministic dimension", async () => {
     const res = await app.request("/ai/embed", {
       method: "POST",
@@ -85,6 +130,87 @@ describe("api worker", () => {
     expect(json.results[0].subject).toBe("math");
   });
 
+  it("uses Vectorize for semantic search when configured", async () => {
+    const embedSpy = vi.spyOn(embeddingsModule, "generateEmbeddings").mockResolvedValue({
+      embeddings: [[0.1, 0.2, 0.3]],
+      dimension: 3,
+      provider: "openai",
+      model: "text-embedding-3-small",
+    });
+
+    const querySpy = vi.fn().mockResolvedValue({
+      count: 1,
+      matches: [
+        {
+          id: "learning:abc",
+          score: 0.9,
+          values: [1, 2, 3],
+          metadata: {
+            userId: "00000000-0000-4000-8000-000000000000",
+            refType: "learning",
+            refId: "abc",
+            label: "高校数学I: 二次関数",
+            excerpt: "二次関数の基本変換",
+            subject: "math",
+          },
+        },
+      ],
+    });
+
+    const env: any = {
+      OPENAI_API_KEY: "sk-test",
+      VECTORIZE_INDEX_DIMENSIONS: 3,
+      VECTORIZE: {
+        query: querySpy,
+        upsert: vi.fn(),
+        deleteByIds: vi.fn(),
+      },
+    };
+
+    const res = await app.request(
+      "/search/semantic",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          query: "二次関数",
+          topK: 5,
+          refType: "learning",
+          subject: "math",
+        }),
+      },
+      env,
+    );
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.results).toHaveLength(1);
+    expect(json.results[0].refType).toBe("learning");
+    expect(json.results[0].subject).toBe("math");
+    expect(querySpy).toHaveBeenCalledTimes(1);
+
+    embedSpy.mockRestore();
+  });
+
+  it("reindexes semantic nodes into Vectorize", async () => {
+    const upsertSpy = vi.fn().mockResolvedValue({ mutationId: "m1" });
+
+    const env: any = {
+      OPENAI_API_KEY: "sk-test",
+      VECTORIZE_INDEX_DIMENSIONS: 12,
+      VECTORIZE: {
+        query: vi.fn(),
+        upsert: upsertSpy,
+        deleteByIds: vi.fn(),
+      },
+    };
+
+    const res = await app.request("/api/semantic/reindex", { method: "POST" }, env);
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.upserted).toBeGreaterThan(0);
+    expect(upsertSpy).toHaveBeenCalled();
+  });
+
   it("provides fallback data for tool-based learning search", async () => {
     const res = await app.request("/ai/tools", {
       method: "POST",
@@ -106,6 +232,28 @@ describe("api worker", () => {
     const { chunks: withEmbeddings, dimension } = await attachEmbeddingsToChunks(chunks);
     expect(withEmbeddings[0].embedding).toBeDefined();
     expect(withEmbeddings[0].embedding?.length).toBe(dimension);
+  });
+
+  it("extracts main text with Readability for HTML inputs", () => {
+    const html = `<!doctype html>
+      <html>
+        <head><title>Demo</title></head>
+        <body>
+          <header>header</header>
+          <main>
+            <article>
+              <h1>見出し</h1>
+              <p>これは本文です。これは本文です。これは本文です。</p>
+              <p>2つ目の段落です。</p>
+            </article>
+          </main>
+          <footer>footer</footer>
+        </body>
+      </html>`;
+    const text = ingestModule.extractReadableTextFromHtml(html, "https://example.com/article");
+    expect(typeof text === "string" || text === null).toBe(true);
+    expect(text ?? "").toContain("これは本文です");
+    expect(text ?? "").toContain("2つ目の段落です");
   });
 
   it("marks preprocessing steps as succeeded when preparing ingest jobs", () => {

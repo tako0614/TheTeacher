@@ -24,7 +24,6 @@ import type {
   LearningSummary,
   SnapshotPayload,
   AuthSessionState,
-  BillingPricing,
 } from "./types";
 import { recordMockFallback, shouldPreferMock } from "./mock-mode";
 
@@ -64,45 +63,6 @@ export const loginWithGoogle = async (idToken: string, deviceName?: string) =>
         body: { idToken, deviceName },
       }),
     () => mockApi.issueSession(),
-  );
-
-export const fetchBillingPricing = async (): Promise<BillingPricing> =>
-  withMockFallback(
-    "fetchBillingPricing",
-    async () => {
-      const { pricing } = await requestJson<{ pricing: BillingPricing }>({
-        path: "/api/billing/pricing",
-      });
-      return pricing;
-    },
-    () => mockApi.fetchBillingPricing(),
-  );
-
-export const fetchBillingBalance = async (): Promise<{ credits: number }> =>
-  withMockFallback(
-    "fetchBillingBalance",
-    () => requestJson<{ credits: number }>({ path: "/api/billing/balance" }),
-    () => mockApi.fetchBillingBalance(),
-  );
-
-export const createBillingCheckout = async (input: {
-  quantity?: number;
-  successUrl: string;
-  cancelUrl: string;
-}) =>
-  withMockFallback(
-    "createBillingCheckout",
-    () =>
-      requestJson<{ url?: string; sessionId?: string }>({
-        path: "/api/billing/checkout",
-        method: "POST",
-        body: {
-          quantity: input.quantity ?? 1,
-          successUrl: input.successUrl,
-          cancelUrl: input.cancelUrl,
-        },
-      }),
-    () => mockApi.createBillingCheckout(input),
   );
 
 export const issueSession = async (deviceName?: string): Promise<AuthSessionResponse> => {

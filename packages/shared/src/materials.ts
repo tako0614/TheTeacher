@@ -8,6 +8,7 @@ export const ocrEngineSchema = z.enum([
 ]);
 
 export const transcriptionEngineSchema = z.enum([
+  "openai_whisper",
   "whisper_rs",
   "assemblyai",
 ]);
@@ -105,6 +106,7 @@ export const ingestRequestSchema = z.object({
     .object({
       text: z.string().min(1).optional(),
       dataUrl: z.string().startsWith("data:").optional(),
+      libraryEntryId: z.string().uuid().optional(),
       fileName: z.string().min(1).optional(),
       bytes: z.number().int().nonnegative().optional(),
       mimeType: z.string().min(1).optional(),

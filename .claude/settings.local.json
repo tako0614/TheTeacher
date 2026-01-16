@@ -6,7 +6,9 @@
       "mcp__codex__codex-reply",
       "Bash(npm run build:*)",
       "Bash(npx tsc:*)",
-      "Bash(pnpm build:*)"
+      "Bash(pnpm build:*)",
+      "Bash(find:*)",
+      "Bash(wc:*)"
     ],
     "deny": [],
     "ask": []

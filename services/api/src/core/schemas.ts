@@ -23,6 +23,14 @@ export const semanticSearchRequestSchema = z.object({
   subject: z.string().min(1).optional(),
 });
 
+export const contentSearchRequestSchema = z.object({
+  query: z.string().min(1),
+  topK: z.number().int().min(1).max(20).default(8),
+  learningId: z.string().uuid().optional(),
+  materialId: z.string().uuid().optional(),
+  subject: z.string().min(1).optional(),
+});
+
 export const learningListQuerySchema = z.object({
   q: z.string().trim().min(1).optional(),
   subject: z.string().trim().min(1).optional(),
@@ -42,6 +50,13 @@ export const ingestJobListQuerySchema = z.object({
 
 export const libraryEntryListQuerySchema = z.object({
   learningId: z.string().uuid().optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+});
+
+export const materialListQuerySchema = z.object({
+  q: z.string().trim().min(1).optional(),
+  learningId: z.string().uuid().optional(),
+  type: schemas.material.shape.type.optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
 });
 

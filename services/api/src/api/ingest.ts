@@ -13,7 +13,7 @@ import type * as PdfJs from "pdfjs-dist/legacy/build/pdf.mjs";
 import { fetchIngestJob, fetchLibraryAsset, fetchLibraryEntryById, saveIngestJob } from "../core/library";
 import { getPrismaClient, nowIso } from "../core/prisma";
 import type { AppBindings } from "../core/types";
-import { applyMaterialMetadataPatch, fetchMaterial } from "./data";
+import { applyMaterialMetadataPatch, fetchLearning, fetchMaterial } from "./data";
 import {
   attachEmbeddingsToChunks,
   chunkMaterialText,
@@ -22,7 +22,18 @@ import {
 import { performOcr } from "./ocr";
 import { type DataUrlPayload } from "./openai";
 import { performTranscription } from "./transcription";
-import { countTokens, encodeDataUrlFromBytes, summarizeText } from "./utils";
+import {
+  countTokens,
+  encodeDataUrlFromBytes,
+  readResponseBytesWithLimit,
+  readResponseTextWithLimit,
+  summarizeText,
+} from "./utils";
+
+import { Readability } from "@mozilla/readability";
+import { parseHTML } from "linkedom";
+import type { VectorizeVector, VectorizeVectorMetadata } from "@cloudflare/workers-types";
+import { asVectorizeBinding, deleteVectorizeByIds, ensureVectorDimensions, resolveExpectedVectorDimensions } from "./vectorize";
 
 export interface LibraryAssetPayload {
   bytes: Uint8Array;
@@ -130,6 +141,64 @@ interface IngestQueueItem {
   env?: AppBindings;
 }
 
+const materialChunkVectorId = (materialId: string, order: number) => `material_chunk:${materialId}:${order}`;
+
+const toChunkVector = (
+  material: Pick<Material, "id" | "userId" | "learningId">,
+  chunk: MaterialChunkRecord,
+  extra?: { subject?: string },
+): VectorizeVector => {
+  const metadata: Record<string, VectorizeVectorMetadata> = {
+    kind: "material_chunk",
+    userId: material.userId,
+    learningId: material.learningId,
+    materialId: material.id,
+    order: chunk.order,
+    preview: chunk.preview,
+    tokens: chunk.tokens,
+    ...(extra?.subject ? { subject: extra.subject } : {}),
+  };
+  return {
+    id: materialChunkVectorId(material.id, chunk.order),
+    values: chunk.embedding ?? [],
+    metadata,
+  };
+};
+
+const syncMaterialChunkVectorsToVectorize = async (input: {
+  env?: AppBindings;
+  material: Pick<Material, "id" | "userId" | "learningId">;
+  chunks: MaterialChunkRecord[];
+  previousChunkCount?: number;
+  subject?: string;
+}) => {
+  const env = input.env;
+  if (!env?.OPENAI_API_KEY?.trim()) return;
+  const vectorize = asVectorizeBinding(env.VECTORIZE);
+  if (!vectorize) return;
+
+  const expected = resolveExpectedVectorDimensions(env);
+  const vectors = input.chunks.map((chunk) => {
+    const embedding = chunk.embedding ?? [];
+    ensureVectorDimensions(embedding, expected);
+    return toChunkVector(input.material, chunk, { subject: input.subject });
+  });
+
+  const batchSize = 50;
+  for (let i = 0; i < vectors.length; i += batchSize) {
+    await vectorize.upsert(vectors.slice(i, i + batchSize));
+  }
+
+  const prev = input.previousChunkCount;
+  if (typeof prev === "number" && Number.isFinite(prev) && prev > vectors.length) {
+    const deletes: string[] = [];
+    for (let order = vectors.length; order < prev; order++) {
+      deletes.push(materialChunkVectorId(input.material.id, order));
+    }
+    await deleteVectorizeByIds(env, deletes);
+  }
+};
+
 const ingestQueue: (IngestQueueItem & { deferred: Deferred<void> })[] = [];
 let ingestQueueRunning = false;
 
@@ -220,6 +289,9 @@ const processIngestQueueItem = async (item: IngestQueueItem & { deferred: Deferr
   }
 
   const metadata = (material.metadata ?? {}) as Record<string, unknown>;
+  const previousChunkCount =
+    typeof (metadata as any)?.chunking?.chunkCount === "number" ? (metadata as any).chunking.chunkCount : undefined;
+  const learning = item.learningId ? await fetchLearning(item.db, item.learningId) : null;
   const libraryEntryId =
     typeof metadata.libraryEntryId === "string" ? metadata.libraryEntryId : undefined;
   const payloadEncoding =
@@ -246,8 +318,18 @@ const processIngestQueueItem = async (item: IngestQueueItem & { deferred: Deferr
   const loadAsset = async () => {
     if (asset) return;
     if (!libraryEntryId) return;
-    entry = entry ?? (await fetchLibraryEntryById(item.db, libraryEntryId));
-    const stored = await fetchLibraryAsset(item.db, libraryEntryId);
+    entry =
+      entry ??
+      (await fetchLibraryEntryById(
+        item.db,
+        libraryEntryId,
+        typeof material.userId === "string" ? material.userId : undefined,
+      ));
+    if (!entry) return;
+    const stored = await fetchLibraryAsset(
+      item.env ?? ({ DB: item.db } as unknown as AppBindings),
+      entry,
+    );
     if (!stored?.data) return;
     const bytes = new Uint8Array(stored.data);
     asset = {
@@ -322,6 +404,13 @@ const processIngestQueueItem = async (item: IngestQueueItem & { deferred: Deferr
         throw new Error("transcription_asset_missing");
       }
 
+      if (preferOffline) {
+        const placeholder = `[transcription_pending_offline] ${asset.fileName ?? "media"}`;
+        state.text = placeholder;
+        transcriptionDetails = { engine: "offline_placeholder" };
+        return;
+      }
+
       const includeSegments = job.source.kind === "video";
       const result = await performTranscription(
         item.env,
@@ -380,6 +469,17 @@ const processIngestQueueItem = async (item: IngestQueueItem & { deferred: Deferr
         provider: prepared.provider,
         model: prepared.model,
       });
+      try {
+        await syncMaterialChunkVectorsToVectorize({
+          env: item.env,
+          material: { id: material.id, userId: material.userId, learningId: material.learningId },
+          chunks: prepared.chunks,
+          previousChunkCount,
+          subject: learning?.subject ?? undefined,
+        });
+      } catch (error) {
+        console.warn("Vectorize chunk indexing failed; continuing ingest pipeline", error);
+      }
     },
   };
 
@@ -424,7 +524,25 @@ const stripHtml = (value: string) =>
  * - ナビゲーション、フッター、サイドバーを除外
  * - 見出しと段落を構造化して抽出
  */
-const extractMainContent = (html: string): string => {
+export const extractReadableTextFromHtml = (html: string, url?: string): string | null => {
+  try {
+    const { document } = parseHTML(html);
+    const resolvedUrl = url?.trim() && /^https?:\/\//i.test(url) ? url.trim() : "https://example.com";
+    Object.defineProperty(document, "URL", { value: resolvedUrl, configurable: true });
+    const article = new Readability(document as any).parse();
+    const text = article?.textContent?.trim() ?? "";
+    if (!text) return null;
+    return text;
+  } catch {
+    return null;
+  }
+};
+
+const extractMainContent = (html: string, url?: string): string => {
+  // Prefer Readability.js for robust "main article" extraction.
+  const readable = extractReadableTextFromHtml(html, url);
+  if (readable && readable.length > 200) return readable;
+
   // 不要な要素を除去
   const cleaned = html
     .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, "")
@@ -512,7 +630,7 @@ const extractMainContent = (html: string): string => {
   return stripHtml(targetHtml);
 };
 
-const extractHtmlSummary = (html: string) => {
+const extractHtmlSummary = (html: string, url?: string) => {
   const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
   const metaDescriptionMatch =
     html.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["']/i) ??
@@ -527,7 +645,7 @@ const extractHtmlSummary = (html: string) => {
   const keywords = metaKeywordsMatch?.[1]?.trim();
   
   // 高度なメインコンテンツ抽出を使用
-  const mainContent = extractMainContent(html);
+  const mainContent = extractMainContent(html, url);
   
   const parts = [
     title ? `タイトル: ${title}` : null,
@@ -549,8 +667,8 @@ const fetchRemoteText = async (url: string): Promise<string> => {
     const json = await res.json().catch(() => null);
     return typeof json === "string" ? json : JSON.stringify(json ?? {});
   }
-  const raw = await res.text();
-  if (contentType.includes("html")) return extractHtmlSummary(raw);
+  const raw = await readResponseTextWithLimit(res, { maxBytes: 6 * 1024 * 1024 });
+  if (contentType.includes("html")) return extractHtmlSummary(raw, url);
   return raw.slice(0, 16_000);
 };
 
@@ -604,8 +722,7 @@ export const fetchRemoteBinary = async (
       ).toFixed(0)}MB 以内にしてください。`,
     );
   }
-  const arrayBuffer = await res.arrayBuffer();
-  const bytes = new Uint8Array(arrayBuffer);
+  const bytes = await readResponseBytesWithLimit(res, { maxBytes: sizeLimit });
   if (bytes.byteLength > sizeLimit) {
     throw new Error(
       `媒体ファイルが大きすぎます (${(bytes.byteLength / 1024 / 1024).toFixed(1)} MB)。${(

@@ -206,6 +206,81 @@ const ensureOpenAiGenerationConfig = (env?: AppBindings) => {
   return { apiKey, model };
 };
 
+type OpenAiChatContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string; detail?: "low" | "high" } };
+
+export type OpenAiChatMessage = {
+  role: "system" | "user" | "assistant";
+  content: string | OpenAiChatContentPart[];
+};
+
+export const callOpenAiChatCompletion = async (
+  env: AppBindings | undefined,
+  input: {
+    messages: OpenAiChatMessage[];
+    model?: string;
+    temperature?: number;
+    maxTokens?: number;
+    responseFormat?: "json_object";
+    preferVision?: boolean;
+  },
+) => {
+  const { apiKey, model: defaultModel } = ensureOpenAiGenerationConfig(env);
+  const model =
+    input.model?.trim() ||
+    (input.preferVision ? env?.OPENAI_VISION_MODEL?.trim() : undefined) ||
+    defaultModel;
+
+  const response = await fetch(`${resolveOpenAiBaseUrl(env)}/chat/completions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model,
+      temperature: input.temperature ?? DEFAULT_GENERATION_TEMPERATURE,
+      max_tokens: input.maxTokens ?? 1100,
+      ...(input.responseFormat ? { response_format: { type: input.responseFormat } } : null),
+      messages: input.messages,
+    }),
+  });
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => response.statusText);
+    throw new ToolCallError(
+      "generation_failed",
+      `OpenAI request failed (${response.status}): ${detail}`,
+      response.status as ContentfulStatusCode,
+    );
+  }
+
+  const json = (await response.json()) as {
+    choices?: { message?: { content?: unknown } }[];
+    model?: string;
+    usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+  };
+  const content = joinChatContent(json.choices?.[0]?.message?.content);
+  if (!content) {
+    throw new ToolCallError("generation_failed", "OpenAI response did not contain any content", 502);
+  }
+
+  const usage = json.usage
+    ? {
+        promptTokens: json.usage.prompt_tokens as number | undefined,
+        completionTokens: json.usage.completion_tokens as number | undefined,
+        totalTokens: json.usage.total_tokens as number | undefined,
+      }
+    : undefined;
+
+  return {
+    text: content,
+    model: (json.model as string | undefined) ?? model,
+    usage,
+  };
+};
+
 export const callOpenAiForGeneration = async (
   env: AppBindings | undefined,
   messages: { role: "system" | "user" | "assistant"; content: string }[],

@@ -165,6 +165,33 @@ export const fetchMaterial = async (
   return mapMaterial(row as unknown as MaterialRow);
 };
 
+export const listMaterials = async (
+  db: D1Database,
+  params: { q?: string; learningId?: string; type?: Material["type"]; limit: number },
+  userId: string,
+) => {
+  const prisma = getPrismaClient(db);
+  const where: Prisma.MaterialWhereInput = {
+    userId,
+    ...(params.learningId ? { learningId: params.learningId } : {}),
+    ...(params.type ? { type: params.type } : {}),
+  };
+
+  if (params.q) {
+    where.OR = [
+      { sourcePath: { contains: params.q, mode: "insensitive" } },
+      { rawContent: { contains: params.q, mode: "insensitive" } },
+    ];
+  }
+
+  const rows = await prisma.material.findMany({
+    where,
+    orderBy: { updatedAt: "desc" },
+    take: params.limit,
+  });
+  return rows.map((row) => mapMaterial(row as unknown as MaterialRow));
+};
+
 export const applyMaterialMetadataPatch = async (
   db: D1Database,
   id: string,

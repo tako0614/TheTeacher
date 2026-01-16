@@ -16,13 +16,11 @@ bucket_name = "theteacher-materials"
 binding = "MATERIALS_KV"
 id = "theteacher-materials-kv"
 
+[[vectorize]]
+binding = "VECTORIZE"
+index_name = "theteacher-semantic"
+
 [vars]
 # Set this to your Google OAuth client ID to enable Google Sign-In
 GOOGLE_CLIENT_ID = ""
-STRIPE_SECRET_KEY = ""
-STRIPE_PRICE_ID = ""
-STRIPE_WEBHOOK_SECRET = ""
-STRIPE_PRICE_CURRENCY = "jpy"
-STRIPE_PRICE_AMOUNT = "1200"
-CREDITS_PER_PACK = "120"
-MIN_PRICE_PER_CREDIT = "12"
+VECTORIZE_INDEX_DIMENSIONS = "1536"

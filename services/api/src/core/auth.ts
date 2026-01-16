@@ -181,7 +181,6 @@ export const publicPaths = new Set<string>([
   "/health",
   "/api/auth/anonymous",
   "/api/auth/google",
-  "/api/billing/webhook",
 ]);
 
 export const fallbackUserContext = (): AuthContext => ({

@@ -39,7 +39,7 @@ export const materialIngestPresets: Array<{
     request: {
       source: { kind: "audio", path: "" },
       preferOffline: false,
-      transcriptionEngine: "whisper_rs",
+      transcriptionEngine: "openai_whisper",
     },
   },
   {
@@ -49,7 +49,7 @@ export const materialIngestPresets: Array<{
     request: {
       source: { kind: "video", path: "" },
       preferOffline: false,
-      transcriptionEngine: "whisper_rs",
+      transcriptionEngine: "openai_whisper",
     },
   },
   {
