@@ -9,6 +9,7 @@ export {
   calculateLearningProgress,
   updateLearningProgress,
   fetchMaterial,
+  fetchMaterialsByIds,
   fetchLatestMaterialForLearning,
   applyMaterialMetadataPatch,
   fetchLearning,

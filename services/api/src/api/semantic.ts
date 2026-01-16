@@ -22,7 +22,7 @@ import { ensureCoreTables, getPrismaClient } from "../core/prisma";
 import type { AppBindings } from "../core/types";
 import { generateEmbeddings, toEmbedding, cosineSimilarity } from "./embeddings";
 import { mapGeneratedContent, mapMaterial, mapPracticeSession } from "./data";
-import { summarizeText } from "./utils";
+import { flattenContent, summarizeText } from "./utils";
 import {
   asVectorizeBinding,
   deleteVectorizeByIds,
@@ -277,20 +277,6 @@ export const deleteSemanticNodesByRef = async (
       ...(userId ? { userId } : {}),
     },
   });
-};
-
-
-const flattenContent = (content: unknown): string => {
-  if (!content) return "";
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) return content.map(flattenContent).join(" ");
-  if (typeof content === "object") {
-    return Object.values(content as Record<string, unknown>)
-      .map((value) => flattenContent(value))
-      .filter(Boolean)
-      .join(" ");
-  }
-  return String(content);
 };
 
 const fallbackSemanticNodes = (userId: string = DEFAULT_USER_ID): (SemanticNodeWithMeta & { embedding: number[] })[] =>
@@ -901,7 +887,7 @@ export const syncSemanticIndexToVectorize = async (
   env: AppBindings | undefined,
   userId: string,
 ): Promise<{ upserted: number }> => {
-  const vectorize = asVectorize(env?.VECTORIZE);
+  const vectorize = asVectorizeBinding(env?.VECTORIZE);
   if (!vectorize) return { upserted: 0 };
   if (!env?.OPENAI_API_KEY?.trim()) {
     throw new Error("OPENAI_API_KEY is required to sync Vectorize index");

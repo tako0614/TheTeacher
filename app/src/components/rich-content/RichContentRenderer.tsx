@@ -39,6 +39,43 @@ const escapeHtml = (unsafe: string) => {
     .replace(/'/g, "&#039;");
 };
 
+/**
+ * Sanitize SVG content to prevent XSS attacks.
+ * Removes script elements, event handlers, and dangerous attributes.
+ */
+const sanitizeSvg = (svgContent: string): string => {
+  if (!svgContent || typeof svgContent !== "string") return "";
+
+  // Remove script tags and their content
+  let sanitized = svgContent.replace(/<script[\s\S]*?<\/script>/gi, "");
+
+  // Remove event handler attributes (onclick, onload, onerror, etc.)
+  sanitized = sanitized.replace(/\s+on\w+\s*=\s*["'][^"']*["']/gi, "");
+  sanitized = sanitized.replace(/\s+on\w+\s*=\s*[^\s>]+/gi, "");
+
+  // Remove javascript: URLs
+  sanitized = sanitized.replace(/javascript:/gi, "");
+
+  // Remove data: URLs in href/src (can contain scripts)
+  sanitized = sanitized.replace(/href\s*=\s*["']data:[^"']*["']/gi, 'href=""');
+  sanitized = sanitized.replace(/src\s*=\s*["']data:[^"']*["']/gi, 'src=""');
+
+  // Remove xlink:href with javascript or data
+  sanitized = sanitized.replace(/xlink:href\s*=\s*["'](?:javascript|data):[^"']*["']/gi, 'xlink:href=""');
+
+  // Remove foreignObject elements (can contain HTML with scripts)
+  sanitized = sanitized.replace(/<foreignObject[\s\S]*?<\/foreignObject>/gi, "");
+
+  // Remove use elements pointing to external resources
+  sanitized = sanitized.replace(/<use[^>]+href\s*=\s*["']https?:[^"']*["'][^>]*\/?>/gi, "");
+
+  // Remove set and animate elements that can trigger scripts
+  sanitized = sanitized.replace(/<set[\s\S]*?(?:\/>|<\/set>)/gi, "");
+  sanitized = sanitized.replace(/<animate[^>]*\s+on\w+[^>]*(?:\/>|<\/animate>)/gi, "");
+
+  return sanitized;
+};
+
 export const renderTextWithMath = (text: string) => {
   const regex = /(\$\$[\s\S]*?\$\$|\$[\s\S]*?\$)/g;
   const parts = text.split(regex);
@@ -345,7 +382,7 @@ const MermaidDiagram: Component<{ content: string }> = (props) => {
       try {
         mermaid.initialize({ startOnLoad: false, theme: 'default' });
         const { svg: renderedSvg } = await mermaid.render(id, content);
-        setSvg(renderedSvg);
+        setSvg(sanitizeSvg(renderedSvg));
         setError(null);
       } catch (e) {
         logger.error("Mermaid diagram rendering failed", "RichContentRenderer", e);
@@ -511,7 +548,7 @@ const DiagramBlock: Component<{ block: RichDiagramBlock }> = (props) => {
         </Match>
         <Match when={props.block.format === "svg" && props.block.content}>
           {/* eslint-disable-next-line solid/no-innerhtml */}
-          <div class="w-full overflow-x-auto" innerHTML={props.block.content!} />
+          <div class="w-full overflow-x-auto" innerHTML={sanitizeSvg(props.block.content!)} />
         </Match>
       </Switch>
     </div>

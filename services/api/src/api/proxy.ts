@@ -17,22 +17,9 @@ import type { SerializedMatch } from "./semantic";
 import { describeRelatedBrief, fallbackLearnings, subjectLabelMap } from "./semantic";
 import { listLearnings, insertLearning, fetchLearning } from "./data";
 import { resolveOpenAiBaseUrl } from "./openai";
-import { joinChatContent, summarizeText } from "./utils";
+import { flattenContent, joinChatContent, summarizeText } from "./utils";
 
 type ToolName = "search_learnings" | "create_learning_from_chat" | "generate_questions" | "save_content";
-
-const flattenContent = (content: unknown): string => {
-  if (!content) return "";
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) return content.map(flattenContent).join(" ");
-  if (typeof content === "object") {
-    return Object.values(content as Record<string, unknown>)
-      .map((value) => flattenContent(value))
-      .filter(Boolean)
-      .join(" ");
-  }
-  return String(content);
-};
 
 const describeGenerationSummary = (
   generated: GeneratedContent[],

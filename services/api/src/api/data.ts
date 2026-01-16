@@ -165,6 +165,33 @@ export const fetchMaterial = async (
   return mapMaterial(row as unknown as MaterialRow);
 };
 
+/**
+ * Batch fetch materials by IDs.
+ * More efficient than fetching one by one (avoids N+1 query).
+ */
+export const fetchMaterialsByIds = async (
+  db: D1Database,
+  ids: string[],
+  userId: string = DEFAULT_USER_ID,
+): Promise<Map<string, Material>> => {
+  if (ids.length === 0) return new Map();
+
+  const prisma = getPrismaClient(db);
+  const rows = await prisma.material.findMany({
+    where: {
+      id: { in: ids },
+      userId,
+    },
+  });
+
+  const materials = new Map<string, Material>();
+  for (const row of rows) {
+    const material = mapMaterial(row as unknown as MaterialRow);
+    materials.set(material.id, material);
+  }
+  return materials;
+};
+
 export const listMaterials = async (
   db: D1Database,
   params: { q?: string; learningId?: string; type?: Material["type"]; limit: number },

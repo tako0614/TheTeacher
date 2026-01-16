@@ -3,6 +3,23 @@ export const summarizeText = (text: string, limit = 280) =>
 
 export const countTokens = (text: string) => text.split(/\s+/).filter(Boolean).length;
 
+/**
+ * Recursively flatten content to a single string.
+ * Handles strings, arrays, and objects.
+ */
+export const flattenContent = (content: unknown): string => {
+  if (!content) return "";
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) return content.map(flattenContent).join(" ");
+  if (typeof content === "object") {
+    return Object.values(content as Record<string, unknown>)
+      .map((value) => flattenContent(value))
+      .filter(Boolean)
+      .join(" ");
+  }
+  return String(content);
+};
+
 export const joinChatContent = (content: unknown): string => {
   if (!content) return "";
   if (typeof content === "string") return content.trim();

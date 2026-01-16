@@ -660,6 +660,7 @@ const extractHtmlSummary = (html: string, url?: string) => {
 };
 
 const fetchRemoteText = async (url: string): Promise<string> => {
+  validateUrlForSsrf(url);
   const res = await fetch(url, { method: "GET" });
   if (!res.ok) throw new Error(`failed to fetch ${url}: ${res.status}`);
   const contentType = res.headers.get("content-type") ?? "";
@@ -674,6 +675,63 @@ const fetchRemoteText = async (url: string): Promise<string> => {
 
 const MAX_MEDIA_BYTES = 25 * 1024 * 1024;
 const isHttpUrl = (value?: string) => typeof value === "string" && /^https?:\/\//i.test(value);
+
+/**
+ * Validate URL for SSRF protection.
+ * Blocks internal IPs, localhost, and other dangerous targets.
+ */
+const validateUrlForSsrf = (urlString: string): void => {
+  let url: URL;
+  try {
+    url = new URL(urlString);
+  } catch {
+    throw new Error("無効なURLです");
+  }
+
+  // Only allow http and https
+  if (!["http:", "https:"].includes(url.protocol)) {
+    throw new Error("HTTPまたはHTTPSのURLのみ許可されています");
+  }
+
+  const hostname = url.hostname.toLowerCase();
+
+  // Block localhost variants
+  if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1") {
+    throw new Error("ローカルホストへのアクセスは許可されていません");
+  }
+
+  // Block private IP ranges
+  const privateIpPatterns = [
+    /^10\./,                          // 10.0.0.0/8
+    /^172\.(1[6-9]|2[0-9]|3[0-1])\./, // 172.16.0.0/12
+    /^192\.168\./,                    // 192.168.0.0/16
+    /^169\.254\./,                    // Link-local
+    /^0\./,                           // 0.0.0.0/8
+    /^100\.(6[4-9]|[7-9][0-9]|1[0-2][0-7])\./, // Carrier-grade NAT
+    /^198\.1[89]\./,                  // Benchmark testing
+    /^fc00:/i,                        // IPv6 unique local
+    /^fe80:/i,                        // IPv6 link-local
+    /^\[::1\]/,                       // IPv6 localhost
+  ];
+
+  for (const pattern of privateIpPatterns) {
+    if (pattern.test(hostname)) {
+      throw new Error("内部ネットワークへのアクセスは許可されていません");
+    }
+  }
+
+  // Block cloud metadata endpoints
+  const blockedHostnames = [
+    "metadata.google.internal",
+    "metadata.google.com",
+    "169.254.169.254",    // AWS/GCP/Azure metadata
+    "instance-data",       // EC2 instance metadata
+  ];
+
+  if (blockedHostnames.includes(hostname)) {
+    throw new Error("このURLへのアクセスは許可されていません");
+  }
+};
 
 const decodeBase64 = (value: string) => {
   if (typeof atob === "function") return atob(value);
@@ -709,6 +767,7 @@ export const fetchRemoteBinary = async (
   url: string,
   sizeLimit = MAX_MEDIA_BYTES,
 ): Promise<DataUrlPayload> => {
+  validateUrlForSsrf(url);
   const res = await fetch(url, { method: "GET" });
   if (!res.ok) {
     throw new Error(`failed to fetch ${url}: ${res.status}`);

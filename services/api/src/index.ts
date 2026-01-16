@@ -49,6 +49,7 @@ import {
   fetchLibraryAsset,
   fetchLibraryEntryById,
   fetchMaterial,
+  fetchMaterialsByIds,
   fetchPreset,
   fetchUserByEmail,
   generateContentsFromMaterial,
@@ -121,6 +122,8 @@ import {
 import type { ProxyResponseContext, SemanticMatch } from "./api-core";
 import { enqueueTtsJob } from "./api/tts";
 import { verifyGoogleIdToken } from "./core/google-auth";
+import { checkRateLimit, createRateLimitKey, RATE_LIMITS } from "./core/rate-limit";
+import { createSafeErrorResponse, sanitizeErrorMessage } from "./core/safe-error";
 
 app.get("/health", (c) => {
   return c.json({ status: "ok" });
@@ -418,7 +421,7 @@ app.post("/api/materials/library/uploads", async (c) => {
     return c.json(created, 201);
   } catch (error) {
     return c.json(
-      { error: "upload_session_failed", message: error instanceof Error ? error.message : "failed" },
+      { error: "upload_session_failed", message: sanitizeErrorMessage(error instanceof Error ? error.message : "failed") },
       503,
     );
   }
@@ -441,7 +444,7 @@ app.put("/api/materials/library/uploads/:id/parts/:part", async (c) => {
     return c.json(result);
   } catch (error) {
     return c.json(
-      { error: "upload_part_failed", message: error instanceof Error ? error.message : "failed" },
+      { error: "upload_part_failed", message: sanitizeErrorMessage(error instanceof Error ? error.message : "failed") },
       400,
     );
   }
@@ -455,7 +458,7 @@ app.post("/api/materials/library/uploads/:id/complete", async (c) => {
     return c.json(result);
   } catch (error) {
     return c.json(
-      { error: "upload_complete_failed", message: error instanceof Error ? error.message : "failed" },
+      { error: "upload_complete_failed", message: sanitizeErrorMessage(error instanceof Error ? error.message : "failed") },
       400,
     );
   }
@@ -469,7 +472,7 @@ app.delete("/api/materials/library/uploads/:id", async (c) => {
     return c.json(result);
   } catch (error) {
     return c.json(
-      { error: "upload_abort_failed", message: error instanceof Error ? error.message : "failed" },
+      { error: "upload_abort_failed", message: sanitizeErrorMessage(error instanceof Error ? error.message : "failed") },
       400,
     );
   }
@@ -955,6 +958,19 @@ app.post("/api/generate/from-material", async (c) => {
   const { user } = requireAuth(c);
   const db = c.env.DB;
   if (!db) return c.json({ error: "db_not_configured" }, 503);
+
+  // Rate limiting
+  const rateLimitResult = checkRateLimit(
+    createRateLimitKey(user.id, "aiGeneration"),
+    RATE_LIMITS.aiGeneration,
+  );
+  if (!rateLimitResult.allowed) {
+    return c.json(
+      { error: "rate_limit_exceeded", message: "リクエスト制限を超えました。しばらく待ってから再試行してください。" },
+      429,
+    );
+  }
+
   const body = await c.req.json().catch(() => null);
   const parsed = generateFromMaterialRequestSchema.safeParse(body);
   if (!parsed.success) {
@@ -1001,7 +1017,7 @@ app.post("/api/generate/from-material", async (c) => {
     return c.json(
       {
         error: "generation_failed",
-        message: error instanceof Error ? error.message : "unknown error",
+        message: sanitizeErrorMessage(error instanceof Error ? error.message : "unknown error"),
       },
       500,
     );
@@ -1180,7 +1196,20 @@ app.delete("/api/presets/:id", async (c) => {
 });
 
 app.post("/ai/embed", async (c) => {
-  requireAuth(c);
+  const { user } = requireAuth(c);
+
+  // Rate limiting
+  const rateLimitResult = checkRateLimit(
+    createRateLimitKey(user.id, "aiEmbed"),
+    RATE_LIMITS.aiEmbed,
+  );
+  if (!rateLimitResult.allowed) {
+    return c.json(
+      { error: "rate_limit_exceeded", message: "リクエスト制限を超えました。" },
+      429,
+    );
+  }
+
   const body = await c.req.json().catch(() => null);
   const parsed = embedRequestSchema.safeParse(body);
 
@@ -1236,7 +1265,7 @@ app.post("/search/content", async (c) => {
     queryVector = embeddings[0];
   } catch (error) {
     return c.json(
-      { error: "embedding_failed", message: error instanceof Error ? error.message : "unknown error" },
+      { error: "embedding_failed", message: sanitizeErrorMessage(error instanceof Error ? error.message : "unknown error") },
       502,
     );
   }
@@ -1264,11 +1293,8 @@ app.post("/search/content", async (c) => {
     ),
   );
 
-  const materials = new Map<string, Material>();
-  for (const id of materialIds) {
-    const material = await fetchMaterial(db, id);
-    if (material) materials.set(id, material);
-  }
+  // Batch fetch materials to avoid N+1 query
+  const materials = await fetchMaterialsByIds(db, materialIds, user.id);
 
   const results = matches
     .map((match: any) => {
@@ -1308,7 +1334,7 @@ app.post("/api/semantic/reindex", async (c) => {
     return c.json({ userId: user.id, ...result });
   } catch (error) {
     return c.json(
-      { error: "reindex_failed", message: error instanceof Error ? error.message : "unknown error" },
+      { error: "reindex_failed", message: sanitizeErrorMessage(error instanceof Error ? error.message : "unknown error") },
       500,
     );
   }
@@ -1333,7 +1359,7 @@ app.post("/ai/tools", async (c) => {
     return c.json(
       {
         error: "tool_failed",
-        message: error instanceof Error ? error.message : "unknown error",
+        message: sanitizeErrorMessage(error instanceof Error ? error.message : "unknown error"),
       },
       500,
     );
@@ -1341,7 +1367,20 @@ app.post("/ai/tools", async (c) => {
 });
 
 app.post("/ai/practice/grade", async (c) => {
-  requireAuth(c);
+  const { user } = requireAuth(c);
+
+  // Rate limiting
+  const rateLimitResult = checkRateLimit(
+    createRateLimitKey(user.id, "aiGeneration"),
+    RATE_LIMITS.aiGeneration,
+  );
+  if (!rateLimitResult.allowed) {
+    return c.json(
+      { error: "rate_limit_exceeded", message: "リクエスト制限を超えました。" },
+      429,
+    );
+  }
+
   const body = await c.req.json().catch(() => null);
   const parsed = practiceGradingRequestSchema.safeParse(body);
   if (!parsed.success) {
@@ -1377,7 +1416,20 @@ app.post("/ai/practice/grade", async (c) => {
 });
 
 app.post("/ai/material/generate", async (c) => {
-  requireAuth(c);
+  const { user } = requireAuth(c);
+
+  // Rate limiting
+  const rateLimitResult = checkRateLimit(
+    createRateLimitKey(user.id, "aiGeneration"),
+    RATE_LIMITS.aiGeneration,
+  );
+  if (!rateLimitResult.allowed) {
+    return c.json(
+      { error: "rate_limit_exceeded", message: "リクエスト制限を超えました。" },
+      429,
+    );
+  }
+
   const body = await c.req.json().catch(() => null);
   const parsed = materialGenerateRequestSchema.safeParse(body);
   if (!parsed.success) {
@@ -1397,7 +1449,7 @@ app.post("/ai/material/generate", async (c) => {
     return c.json(
       {
         error: "generation_failed",
-        message: error instanceof Error ? error.message : "unknown error",
+        message: sanitizeErrorMessage(error instanceof Error ? error.message : "unknown error"),
       },
       500,
     );
@@ -1405,7 +1457,20 @@ app.post("/ai/material/generate", async (c) => {
 });
 
 app.post("/ai/chat", async (c) => {
-  requireAuth(c);
+  const { user } = requireAuth(c);
+
+  // Rate limiting
+  const rateLimitResult = checkRateLimit(
+    createRateLimitKey(user.id, "aiChat"),
+    RATE_LIMITS.aiChat,
+  );
+  if (!rateLimitResult.allowed) {
+    return c.json(
+      { error: "rate_limit_exceeded", message: "リクエスト制限を超えました。" },
+      429,
+    );
+  }
+
   const body = await c.req.json().catch(() => null);
   const parsed = openAiChatProxyRequestSchema.safeParse(body);
   if (!parsed.success) {
@@ -1425,7 +1490,7 @@ app.post("/ai/chat", async (c) => {
     return c.json(
       {
         error: "proxy_failed",
-        message: error instanceof Error ? error.message : "unknown error",
+        message: sanitizeErrorMessage(error instanceof Error ? error.message : "unknown error"),
       },
       500,
     );
@@ -1436,6 +1501,19 @@ app.post("/ai/proxy", async (c) => {
   const { user } = requireAuth(c);
   const db = c.env.DB;
   if (!db) return c.json({ error: "db_not_configured" }, 503);
+
+  // Rate limiting
+  const rateLimitResult = checkRateLimit(
+    createRateLimitKey(user.id, "aiChat"),
+    RATE_LIMITS.aiChat,
+  );
+  if (!rateLimitResult.allowed) {
+    return c.json(
+      { error: "rate_limit_exceeded", message: "リクエスト制限を超えました。" },
+      429,
+    );
+  }
+
   const body = await c.req.json().catch(() => null);
   const parsed = proxyRequestSchema.safeParse(body);
 

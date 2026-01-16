@@ -16,6 +16,7 @@ import { ToastProvider } from "./lib/toast-store";
 import { useMockMode } from "./lib/mock-mode";
 import { surfaces } from "./surfaces";
 import ToastContainer from "./components/ToastContainer";
+import ErrorBoundary from "./components/ErrorBoundary";
 
 const MockModeBadge: Component = () => {
   const mockMode = useMockMode();
@@ -191,22 +192,24 @@ const AppShell: ParentComponent = (props) => {
 };
 
 const App: Component = () => (
-  <AuthProvider>
-    <SettingsProvider>
-      <NewLearningDraftProvider>
-        <ToastProvider>
-          <Router root={AppShell}>
-            <For each={surfaces}>
-              {(surface) => (
-                <Route path={surface.path} component={surface.component} />
-              )}
-            </For>
-            <Route path="*" component={surfaces[0].component} />
-          </Router>
-        </ToastProvider>
-      </NewLearningDraftProvider>
-    </SettingsProvider>
-  </AuthProvider>
+  <ErrorBoundary>
+    <AuthProvider>
+      <SettingsProvider>
+        <NewLearningDraftProvider>
+          <ToastProvider>
+            <Router root={AppShell}>
+              <For each={surfaces}>
+                {(surface) => (
+                  <Route path={surface.path} component={surface.component} />
+                )}
+              </For>
+              <Route path="*" component={surfaces[0].component} />
+            </Router>
+          </ToastProvider>
+        </NewLearningDraftProvider>
+      </SettingsProvider>
+    </AuthProvider>
+  </ErrorBoundary>
 );
 
 export default App;
